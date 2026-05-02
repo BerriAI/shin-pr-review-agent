@@ -1,38 +1,59 @@
 # shin-pr-review-agent
 
-Small HTTP server that chats with GitHub PRs: triage + pattern review, powered by [pi-coding-agent](https://github.com/mariozechner/pi-coding-agent) and LiteLLM.
+![shin-pr-review-agent](banner.svg)
 
-<img width="2076" height="1812" alt="Xnapper-2026-05-01-19 53 59" src="https://github.com/user-attachments/assets/f61dda15-6dbb-4b0c-b714-5054bc1c4e97" />
+an agent that reviews GitHub PRs: triage + pattern analysis, powered by [pi-coding-agent](https://github.com/mariozechner/pi-coding-agent) and LiteLLM.
 
-## What you need
+when `POST_COMMENTS=true`, the agent posts its review directly as a GitHub PR comment.
 
-- Node **≥20.6**
-- **PostgreSQL** (`DATABASE_URL`)
-- A **LiteLLM** deployment (`LITELLM_API_BASE`, `LITELLM_API_KEY`)
+## Features
 
-Copy `.env.example` → `.env` and fill it in. The app applies SQL migrations on startup.
+- accepts PR URLs via chat UI, API, or OpenAI-compatible endpoint
+- runs triage + pattern review pipeline via pi-coding-agent
+- stores all review runs in Postgres for history and replay
+- serves a `/chat` UI and a `/runs` history view
+- exposes `POST /v1/chat/completions` (OpenAI-shaped) for machine callers
 
-## Run
+<img width="2076" height="1812" alt="shin-pr-review-agent output" src="https://github.com/user-attachments/assets/f61dda15-6dbb-4b0c-b714-5054bc1c4e97" />
+
+## Setup
 
 ```bash
+nvm use 20
 npm install
-npm run dev    # watch + reload
-# or
+cp .env.example .env
+# fill in DATABASE_URL, LITELLM_API_BASE, LITELLM_API_KEY
+```
+
+Prerequisites: Node **≥20.6**, PostgreSQL. The app applies SQL migrations on startup.
+
+## Usage
+
+```bash
+# watch + reload
+npm run dev
+
+# production
 npm start
 ```
 
 Default port **8081** (`PORT` overrides).
 
-## Use it
+**Browser:** open `/chat` to talk to the agent, `/runs` to see saved reviews.
 
-**Browser:** `/chat` (talk to the agent), `/runs` (saved reviews).
+**API:**
+```bash
+# OpenAI-shaped
+curl http://localhost:8081/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" \
+  -d '{"model":"x","messages":[{"role":"user","content":"review https://github.com/org/repo/pull/123"}]}'
+```
 
-**Auth:** If you set `ADMIN_USERNAME` / `ADMIN_PASSWORD` or `BOT_API_KEYS`, routes are locked. Log in via `/login`, or send `Authorization: Bearer <key>` for APIs.
+## Auth flags
 
-**Machines:** `POST /chat/api` or `POST /v1/chat/completions` (OpenAI-shaped: last user message is the prompt). Same auth as above.
+Both default to off — safe to run locally with no gate.
 
-**No auth env vars = no gate.** Fine on localhost. Stupid on the public internet.
+- `ADMIN_USERNAME` / `ADMIN_PASSWORD` — enables login at `/login`
+- `BOT_API_KEYS` — comma-separated bearer tokens for API access
 
-## What it does
-
-You give it a PR URL (or ask in chat). It runs the review pipeline, stores runs in Postgres, and can show history in the UI.
+No auth env vars set = no gate. Fine on localhost. Do not expose unauthenticated to the public internet.

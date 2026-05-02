@@ -1,4 +1,4 @@
-# pi-pr-review-agent
+# shin-pr-review-agent
 
 Small HTTP server that chats with GitHub PRs: triage + pattern review, powered by [pi-coding-agent](https://github.com/mariozechner/pi-coding-agent) and LiteLLM.
 

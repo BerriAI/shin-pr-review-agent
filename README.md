@@ -34,5 +34,3 @@ Default port **8081** (`PORT` overrides).
 ## What it does
 
 You give it a PR URL (or ask in chat). It runs the review pipeline, stores runs in Postgres, and can show history in the UI.
-
-That’s the deal.

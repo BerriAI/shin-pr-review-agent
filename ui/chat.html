@@ -1,0 +1,392 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>litellm-bot dev chat</title>
+<style>
+  *{box-sizing:border-box}
+  body{font:14px/1.5 -apple-system,system-ui,sans-serif;margin:0;color:#222;height:100vh;display:flex}
+  #sidebar{width:240px;border-right:1px solid #ddd;background:#f5f5f7;display:flex;flex-direction:column;height:100vh}
+  #sidebar-head{padding:12px;border-bottom:1px solid #e0e0e3;display:flex;gap:8px;align-items:center}
+  #sidebar-head h2{font-size:13px;margin:0;flex:1;color:#333}
+  #new-btn{padding:6px 10px;border:0;border-radius:4px;background:#222;color:#fff;cursor:pointer;font:inherit;font-size:12px}
+  #threads{flex:1;overflow-y:auto;padding:6px}
+  .thread{padding:8px 10px;border-radius:5px;cursor:pointer;display:flex;align-items:center;gap:6px;margin-bottom:2px;color:#444}
+  .thread:hover{background:#e8e8ec}
+  .thread.active{background:#222;color:#fff}
+  .thread.active .del{color:#bbb}
+  .thread .title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+  .thread .del{border:0;background:transparent;color:#999;cursor:pointer;font-size:14px;padding:0 4px;visibility:hidden}
+  .thread:hover .del{visibility:visible}
+  .thread.active .del:hover{color:#fff}
+  #main{flex:1;display:flex;flex-direction:column;height:100vh;max-width:900px;margin:0 auto;padding:24px;overflow:hidden}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:#666;font-size:12px;margin-bottom:16px}
+  #log{flex:1;border:1px solid #ddd;border-radius:6px;padding:12px;overflow-y:auto;background:#fafafa}
+  .msg{margin:0 0 14px;white-space:pre-wrap;word-wrap:break-word}
+  .user{color:#0a4}
+  .bot{color:#222}
+  .tool{color:#888;font-family:ui-monospace,Menlo,monospace;font-size:12px;background:#eef;border-left:3px solid #88a;padding:6px 8px;margin:4px 0;border-radius:3px}
+  .err{color:#c00}
+  form{display:flex;gap:8px;margin-top:12px}
+  input[type=text]{flex:1;padding:10px;border:1px solid #ccc;border-radius:6px;font:inherit}
+  button{padding:10px 16px;border:0;border-radius:6px;background:#222;color:#fff;cursor:pointer;font:inherit}
+  button:disabled{opacity:.5;cursor:wait}
+  .hint{color:#888;font-size:12px;margin-top:8px}
+  .empty{color:#999;font-size:12px;text-align:center;padding:16px}
+  #sidebar-foot{padding:10px 12px;border-top:1px solid #e0e0e3}
+  #logout-form{margin:0}
+  #logout-btn{width:100%;padding:7px 10px;border:1px solid #ccc;border-radius:4px;
+              background:#fff;color:#444;cursor:pointer;font:inherit;font-size:12px}
+  #logout-btn:hover{background:#eee}
+</style></head>
+<body>
+<aside id="sidebar">
+  <div id="sidebar-head">
+    <h2>Chats</h2>
+    <a href="/runs" style="font-size:12px;color:#06c;text-decoration:none;padding:4px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;margin-right:6px">Runs</a>
+    <button id="new-btn" type="button">+ New</button>
+  </div>
+  <div id="threads"></div>
+  <div id="sidebar-foot">
+    <form id="logout-form" method="post" action="/logout">
+      <button id="logout-btn" type="submit">Sign out</button>
+    </form>
+  </div>
+</aside>
+<main id="main">
+  <h1>litellm-bot dev chat</h1>
+  <div class="sub">Sends to <code>POST /chat/api</code> → same agent the Slack handler uses.</div>
+  <div id="log"></div>
+  <form id="f">
+    <input id="m" type="text" placeholder="Triage this PR: https://github.com/BerriAI/litellm/pull/123" autofocus>
+    <button id="b" type="submit">Send</button>
+  </form>
+  <div class="hint">Tool calls show inline. First request can take 30–60s while the gather script hits GitHub. You can click + New or switch threads while a request is in flight — the response will land in its origin thread.</div>
+</main>
+<script>
+const log = document.getElementById('log');
+const form = document.getElementById('f');
+const input = document.getElementById('m');
+const btn = document.getElementById('b');
+const threadsEl = document.getElementById('threads');
+const newBtn = document.getElementById('new-btn');
+
+let threadId = localStorage.getItem('threadId');
+// Per-thread in-flight state. If pending.has(id), there is a request out for
+// that thread and we should show the user message + a thinking placeholder
+// when that thread is the active view. Cleared when the response (or error)
+// lands. This is what lets the user spawn / switch to other threads without
+// the in-flight request blocking the UI.
+const pending = new Map(); // threadId -> {userMessage: string}
+
+// Client-minted threads that the server hasn't acknowledged yet. The submit
+// handler registers an entry here *before* sending so the sidebar can render
+// the row immediately (with the user's input as the title). On the next
+// refreshThreads() the server-returned thread for this id replaces the
+// optimistic stub. Cleared when the chat response for the thread lands.
+const optimistic = new Map(); // threadId -> {title, updated_at}
+
+function mintThreadId(){
+  // crypto.randomUUID is available in all evergreen browsers; the dashes are
+  // stripped to keep ids visually consistent with the server's uuid4().hex.
+  return crypto.randomUUID().replace(/-/g, '');
+}
+
+function titleFromMessage(msg){
+  // Mirror the server-side truncation in chat_api so the sidebar title
+  // doesn't shift when the response lands and the server reconciles.
+  return msg.length > 60 ? msg.slice(0, 60) + '…' : msg;
+}
+
+async function authFetch(url, opts){
+  const r = await fetch(url, opts);
+  if (r.status === 401) {
+    window.location.href = '/login';
+    throw new Error('redirecting to login');
+  }
+  return r;
+}
+
+function add(cls, text){
+  const div = document.createElement('div');
+  div.className = 'msg ' + cls;
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return div;
+}
+
+function addTrace(trace){
+  for (const t of trace) {
+    if (t.kind === 'call') {
+      add('tool', '→ ' + t.tool + '(' + JSON.stringify(t.args) + ')');
+    } else if (t.kind === 'return' || t.kind === 'result') {
+      add('tool', '← ' + t.tool + (t.isError ? ' ERROR' : '') + ': ' + t.preview);
+    } else if (t.kind === 'label') {
+      add('tool', '— ' + t.tool + ' —');
+    }
+  }
+}
+
+// Disable Send only for the active thread when its own request is in flight.
+// Other threads (and brand-new ones) stay interactive.
+function syncSendButton(){
+  btn.disabled = !!(threadId && pending.has(threadId));
+}
+
+function setActiveThread(id){
+  threadId = id;
+  if (id) localStorage.setItem('threadId', id);
+  else localStorage.removeItem('threadId');
+  for (const el of threadsEl.querySelectorAll('.thread')) {
+    el.classList.toggle('active', el.dataset.id === id);
+  }
+  syncSendButton();
+}
+
+// Cached last server-known thread list. renderThreads() uses this as its
+// baseline so a synchronous repaint (e.g. after registering an optimistic
+// thread) doesn't have to wait on a fetch.
+let lastServerThreads = [];
+
+function renderThreads(threads){
+  if (threads !== undefined) lastServerThreads = threads;
+  // Merge the cached server list with any client-minted threads the server
+  // hasn't seen yet. Server entries win on duplicate id (their title is
+  // canonical once they exist), so when the chat response lands and
+  // refreshThreads() re-runs the optimistic stub gets replaced cleanly.
+  const merged = new Map();
+  for (const [id, stub] of optimistic) {
+    merged.set(id, {id, title: stub.title, updated_at: stub.updated_at});
+  }
+  for (const t of lastServerThreads) {
+    merged.set(t.id, t);
+  }
+  const rows = [...merged.values()].sort((a, b) => b.updated_at - a.updated_at);
+
+  threadsEl.innerHTML = '';
+  if (!rows.length) {
+    const e = document.createElement('div');
+    e.className = 'empty';
+    e.textContent = 'No chats yet. Click + New to start.';
+    threadsEl.appendChild(e);
+    return;
+  }
+  for (const t of rows) {
+    const row = document.createElement('div');
+    row.className = 'thread' + (t.id === threadId ? ' active' : '');
+    row.dataset.id = t.id;
+    const title = document.createElement('span');
+    title.className = 'title';
+    title.textContent = t.title + (pending.has(t.id) ? ' …' : '');
+    const del = document.createElement('button');
+    del.className = 'del';
+    del.textContent = '×';
+    del.title = 'Delete chat';
+    del.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm('Delete this chat?')) return;
+      // 404 is fine here — the thread may be optimistic-only (server never
+      // saw it because the user deleted before submit completed).
+      await authFetch('/chat/api/threads/' + t.id, {method: 'DELETE'}).catch(() => {});
+      optimistic.delete(t.id);
+      pending.delete(t.id);
+      if (t.id === threadId) {
+        log.innerHTML = '';
+        setActiveThread(null);
+      }
+      await refreshThreads();
+    });
+    row.appendChild(title);
+    row.appendChild(del);
+    row.addEventListener('click', () => loadThread(t.id));
+    threadsEl.appendChild(row);
+  }
+}
+
+async function refreshThreads(){
+  const r = await authFetch('/chat/api/threads');
+  const threads = await r.json();
+  renderThreads(threads);
+}
+
+async function loadThread(id){
+  setActiveThread(id);
+  log.innerHTML = '';
+  const r = await authFetch('/chat/api/threads/' + id);
+  if (!r.ok) {
+    // 404 is expected for an optimistic thread whose first chat request is
+    // still in flight — the server only creates the row when /chat/api hits
+    // its upsert. Keep the thread active and replay the optimistic state
+    // below; the post-response refresh will surface the real turns.
+    if (r.status !== 404 || !optimistic.has(id)) {
+      setActiveThread(null);
+      await refreshThreads();
+      return;
+    }
+  } else {
+    const data = await r.json();
+    for (const turn of data.turns) {
+      if (turn.role === 'user') {
+        add('user', '> ' + turn.content);
+      } else {
+        if (turn.tool_trace) addTrace(turn.tool_trace);
+        add('bot', turn.content);
+      }
+    }
+  }
+  // If this thread has a request in flight, replay the optimistic user
+  // message + thinking placeholder so switching back mid-request looks right.
+  const p = pending.get(id);
+  if (p) {
+    add('user', '> ' + p.userMessage);
+    add('bot', 'thinking...');
+  }
+  refreshThreads();
+}
+
+async function createThread(){
+  const r = await authFetch('/chat/api/threads', {method: 'POST'});
+  if (!r.ok) throw new Error('failed to create thread');
+  const t = await r.json();
+  return t.id;
+}
+
+newBtn.addEventListener('click', async () => {
+  try {
+    const id = await createThread();
+    log.innerHTML = '';
+    setActiveThread(id);
+    await refreshThreads();
+    input.focus();
+  } catch (err) {
+    add('err', String(err));
+  }
+});
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = input.value.trim();
+  if (!msg) return;
+  // Lock in the originating thread *now*. The user may switch away while the
+  // request is pending; the response must land in (and only in) this thread.
+  // If there's no active thread we mint one client-side (id + title) so the
+  // sidebar row appears immediately, with no round-trip to POST /chat/api/threads.
+  // The server upserts the thread on first sight inside /chat/api.
+  let originId = threadId;
+  const sendTitle = titleFromMessage(msg);
+  let isNewOrigin = false;
+  if (!originId) {
+    originId = mintThreadId();
+    optimistic.set(originId, {title: sendTitle, updated_at: Date.now() / 1000});
+    setActiveThread(originId);
+    isNewOrigin = true;
+  }
+
+  pending.set(originId, {userMessage: msg});
+  input.value = '';
+  // Render optimistically only if we're still looking at the origin thread.
+  if (originId === threadId) {
+    if (isNewOrigin) log.innerHTML = '';
+    add('user', '> ' + msg);
+    add('bot', 'thinking...');
+  }
+  syncSendButton();
+  // Synchronous repaint using the cached server list overlaid with the
+  // optimistic stub — the new row appears instantly. The background
+  // refreshThreads() then reconciles with the actual server state once the
+  // chat response (or any other change) has had a chance to land.
+  renderThreads();
+  refreshThreads();
+
+  try {
+    const r = await authFetch('/chat/stream', {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({message: msg, thread_id: originId, title: sendTitle}),
+    });
+    pending.delete(originId);
+    optimistic.delete(originId);
+    if (!r.ok) {
+      const t = await r.text();
+      if (originId === threadId) {
+        if (log.lastChild) log.lastChild.remove();
+        add('err', 'HTTP ' + r.status + ': ' + t);
+      }
+      syncSendButton();
+      refreshThreads();
+      return;
+    }
+
+    // Remove "thinking..." placeholder; we'll render streaming events live
+    if (originId === threadId && log.lastChild) log.lastChild.remove();
+
+    let botEl = null; // current bot text element for streaming
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop(); // keep incomplete last line
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+        if (originId !== threadId) continue;
+
+        if (evt.type === 'progress') {
+          add('tool', '⋯ ' + evt.text);
+        } else if (evt.type === 'tool_call') {
+          botEl = null; // break text stream on tool call
+          add('tool', '→ ' + evt.tool + '(' + JSON.stringify(evt.args) + ')');
+        } else if (evt.type === 'tool_result') {
+          botEl = null;
+          add('tool', '← ' + evt.tool + (evt.isError ? ' ERROR' : '') + ': ' + evt.preview);
+        } else if (evt.type === 'text_delta') {
+          if (!botEl) { botEl = add('bot', ''); }
+          botEl.textContent += evt.delta;
+        } else if (evt.type === 'done') {
+          // Final: replace streamed text with full output (handles edge cases)
+          if (botEl) { botEl.textContent = evt.output; }
+          else { add('bot', evt.output); }
+          if (evt.available_tools?.length) {
+            // Prepend tools line before the bot message
+            const toolEl = document.createElement('div');
+            toolEl.className = 'msg tool';
+            toolEl.textContent = '🔧 tools: ' + evt.available_tools.join(', ');
+            log.insertBefore(toolEl, botEl);
+          }
+        } else if (evt.type === 'error') {
+          add('err', evt.message);
+        }
+      }
+    }
+
+    syncSendButton();
+    refreshThreads();
+  } catch (err) {
+    pending.delete(originId);
+    optimistic.delete(originId);
+    if (originId === threadId) {
+      if (log.lastChild) log.lastChild.remove();
+      add('err', String(err));
+    }
+    syncSendButton();
+    refreshThreads();
+  } finally {
+    if (originId === threadId) input.focus();
+  }
+});
+
+(async () => {
+  await refreshThreads();
+  if (threadId) {
+    const r = await authFetch('/chat/api/threads/' + threadId);
+    if (r.ok) loadThread(threadId);
+    else setActiveThread(null);
+  }
+})();
+</script>
+</body></html>

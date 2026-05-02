@@ -1,0 +1,605 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Agent runs — litellm-bot</title>
+<style>
+  *{box-sizing:border-box}
+  /* Page scrolls normally — no fixed-viewport flex contortions. The
+     sidebar is position:fixed so it stays put while the main column
+     scrolls; the right column inside main uses position:sticky so the
+     trace follows you as you scroll the card/drilldown. This is the
+     pattern GitHub PR pages use and it survives any viewport size,
+     browser zoom, or content height without `min-height:0` voodoo. */
+  html,body{margin:0;padding:0}
+  body{font:14px/1.5 -apple-system,system-ui,sans-serif;color:#222;background:#fafafa;padding-left:380px}
+  #sidebar{position:fixed;top:0;left:0;width:380px;height:100vh;border-right:1px solid #ddd;background:#f5f5f7;display:flex;flex-direction:column;z-index:5}
+  #sidebar-head{padding:12px 14px;border-bottom:1px solid #e0e0e3;display:flex;gap:8px;align-items:center}
+  #sidebar-head h2{font-size:13px;margin:0;flex:1;color:#333}
+  #nav-link{font-size:12px;color:#06c;text-decoration:none;padding:4px 8px;border:1px solid #ddd;border-radius:4px;background:#fff}
+  #nav-link:hover{background:#eef}
+  #runs-list{flex:1;overflow-y:auto}
+  .run-row{padding:10px 14px;border-bottom:1px solid #eee;cursor:pointer;display:flex;flex-direction:column;gap:4px}
+  .run-row:hover{background:#eef}
+  .run-row.active{background:#222;color:#fff}
+  .run-row.active .run-meta{color:#bbb}
+  .run-row.active .run-title{color:#fff}
+  .run-top{display:flex;align-items:center;gap:6px}
+  .badge{font-size:11px;padding:2px 6px;border-radius:3px;font-weight:600;flex-shrink:0}
+  .badge-ready{background:#d4f4dd;color:#0a5}
+  .badge-blocked{background:#fde0e0;color:#c00}
+  .badge-waiting{background:#fff4d6;color:#a70}
+  .run-row.active .badge{filter:brightness(1.05)}
+  .scope-tag{font-size:10px;padding:1px 5px;border-radius:3px;background:#ddd;color:#555;text-transform:uppercase;letter-spacing:.04em;flex-shrink:0}
+  .scope-mock{background:#e8e0ff;color:#63a}
+  .scope-slack{background:#e1f0ff;color:#06c}
+  .scope-chat{background:#fff4d6;color:#a70}
+  .scope-eval{background:#d4f4dd;color:#0a5}
+  .label-tag{font-size:10px;padding:1px 5px;border-radius:3px;flex-shrink:0}
+  .label-ready{background:#d4f4dd;color:#0a5}
+  .label-not_ready{background:#fde0e0;color:#c00}
+  .label-empty{background:#eee;color:#888}
+  .run-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500}
+  .run-meta{font-size:11px;color:#888;display:flex;gap:8px}
+  .empty{color:#999;font-size:13px;text-align:center;padding:32px}
+  /* Main column = the rest of the page beside the fixed sidebar. No
+     overflow tricks; the document scrolls. */
+  #main{min-height:100vh}
+  #empty-detail{min-height:100vh;display:flex;align-items:center;justify-content:center;color:#999;font-size:14px}
+  #detail{display:block;width:100%}
+  /* Header sticks to top of viewport while you scroll. */
+  .detail-header{position:sticky;top:0;z-index:4;padding:18px 28px 12px;border-bottom:1px solid #e0e0e3;background:#fff}
+  .detail-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:8px;flex-wrap:wrap}
+  .detail-head h1{font-size:18px;margin:0;flex:1;min-width:300px}
+  .pr-link{font-size:12px;color:#06c;text-decoration:none}
+  .pr-link:hover{text-decoration:underline}
+  .detail-meta{color:#666;font-size:12px;display:flex;gap:14px;flex-wrap:wrap}
+  .detail-meta a{color:#06c;text-decoration:none}
+  .detail-meta a:hover{text-decoration:underline}
+  /* Two-column body. Document-level scroll. The right column is
+     position:sticky so the trace tracks the viewport while the left
+     scrolls past it. */
+  .detail-body{display:grid;grid-template-columns:minmax(0, 1fr) minmax(420px, 560px);align-items:start}
+  @media (max-width: 1100px){
+    .detail-body{grid-template-columns:1fr}
+    .detail-right{border-left:0;border-top:1px solid #e0e0e3;position:static !important;max-height:none !important}
+  }
+  .detail-left{padding:20px 28px 40px;background:#fafafa;min-width:0}
+  /* Sticky right column. Header is ~80px so we offset by that and
+     constrain max-height so internal panes scroll, not the whole
+     thing eating the viewport. */
+  .detail-right{position:sticky;top:80px;display:flex;flex-direction:column;background:#fff;border-left:1px solid #e0e0e3;max-height:calc(100vh - 80px);overflow:hidden;min-width:0}
+  .right-tabs{display:flex;border-bottom:1px solid #e0e0e3;background:#fafafa;flex-shrink:0}
+  .right-tab{padding:10px 16px;border:0;background:transparent;font:inherit;font-size:12px;color:#666;cursor:pointer;border-bottom:2px solid transparent;text-transform:uppercase;letter-spacing:.04em;font-weight:600;display:flex;align-items:center;gap:6px}
+  .right-tab:hover{color:#222;background:#f0f0f7}
+  .right-tab.active{color:#222;border-bottom-color:#222;background:#fff}
+  .right-tab .count{font-size:10px;background:#ddd;color:#555;padding:1px 6px;border-radius:8px;font-weight:500;letter-spacing:0;text-transform:none}
+  .right-tab.active .count{background:#222;color:#fff}
+  .right-pane{flex:1;overflow-y:auto;padding:18px 22px 24px;min-height:0}
+  .right-pane.hidden{display:none}
+  .right-pane h3{display:flex;align-items:center;gap:8px}
+  .right-tag{font-size:10px;padding:2px 6px;border-radius:3px;background:#e0e0e3;color:#555;text-transform:uppercase;letter-spacing:.04em;font-weight:600}
+  .section{background:#fff;border:1px solid #e0e0e3;border-radius:6px;padding:14px 18px;margin-bottom:14px}
+  .detail-right .section{box-shadow:none;background:#fff}
+  .section h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#666;font-weight:600}
+  .card-text,.drilldown-text{white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;line-height:1.55;color:#222}
+  .trace-item{border-left:3px solid #88a;background:#f0f0f7;padding:6px 10px;margin:6px 0;border-radius:3px;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-word}
+  .trace-call{border-left-color:#5b8}
+  .trace-return{border-left-color:#88a}
+  /* Full-trace renderer (one block per pydantic_ai message part). Each part
+     gets a kind-tinted border so the eye can scan a long trace fast. */
+  .trace-controls{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+  .arm-tabs{display:flex;gap:6px}
+  .arm-tab{padding:5px 12px;border:1px solid #ccc;background:#fff;border-radius:4px;font:inherit;font-size:12px;cursor:pointer;color:#444}
+  .arm-tab.active{background:#222;color:#fff;border-color:#222}
+  .arm-tab:disabled{opacity:.4;cursor:not-allowed}
+  .trace-toggle-all{margin-left:auto;font:inherit;font-size:11px;color:#06c;background:transparent;border:1px solid #ccc;border-radius:4px;padding:4px 10px;cursor:pointer}
+  .trace-toggle-all:hover{background:#f0f0f7}
+  .part{border-left:3px solid #ccc;background:#fff;border:1px solid #e8e8ea;border-left-width:3px;border-radius:4px;margin:8px 0;font-size:12px}
+  .part-system{border-left-color:#a89}
+  .part-user{border-left-color:#5a8}
+  .part-text{border-left-color:#aaa}
+  .part-tool-call{border-left-color:#5b8}
+  .part-tool-return{border-left-color:#88a}
+  .part-retry-prompt{border-left-color:#c80}
+  .part-head{padding:6px 10px;display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;background:#fafafa;border-bottom:1px solid #eee}
+  .part-head:hover{background:#f0f0f7}
+  .part-kind{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.05em}
+  .part-name{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:#222}
+  .part-bytes{margin-left:auto;font-size:10.5px;color:#888;font-family:ui-monospace,Menlo,monospace}
+  .part-toggle{font-size:11px;color:#888;width:14px;text-align:center}
+  .part-body{padding:10px 12px;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-word;background:#fff;line-height:1.5;max-height:600px;overflow-y:auto}
+  .part-body.collapsed{display:none}
+  .part-body pre{margin:0;font:inherit}
+  .trace-empty{color:#888;font-size:12px;font-style:italic;padding:10px 4px}
+  .label-form label{display:block;font-size:12px;color:#444;margin:8px 0 4px}
+  .label-form select,.label-form textarea{width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font:inherit;font-size:13px}
+  .label-form textarea{min-height:80px;resize:vertical}
+  .label-buttons{display:flex;gap:8px;margin-top:12px;align-items:center}
+  .label-buttons button{padding:8px 14px;border:0;border-radius:4px;background:#222;color:#fff;cursor:pointer;font:inherit;font-size:13px}
+  .label-buttons button.secondary{background:#fff;color:#444;border:1px solid #ccc}
+  .label-buttons button.danger{background:#c33;color:#fff}
+  .label-buttons button:disabled{opacity:.5;cursor:wait}
+  .label-buttons .status{font-size:12px;color:#888}
+  .err{color:#c00;font-size:12px;margin-top:6px}
+  .ok{color:#0a5;font-size:12px;margin-top:6px}
+</style></head>
+<body>
+<aside id="sidebar">
+  <div id="sidebar-head">
+    <h2>Agent runs</h2>
+    <a id="nav-link" href="/chat">Chat →</a>
+  </div>
+  <div id="runs-list"><div class="empty">Loading…</div></div>
+</aside>
+<main id="main">
+  <div id="empty-detail">Select a run on the left.</div>
+  <div id="detail" style="display:none"></div>
+</main>
+<script>
+const runsListEl = document.getElementById('runs-list');
+const detailEl = document.getElementById('detail');
+const emptyDetailEl = document.getElementById('empty-detail');
+let activeRunId = null;
+let runs = [];
+
+async function authFetch(url, opts){
+  const r = await fetch(url, opts);
+  if (r.status === 401) { window.location.href = '/login'; throw new Error('redirecting to login'); }
+  return r;
+}
+
+function fmtTime(ts){
+  const d = new Date(ts * 1000);
+  return d.toLocaleString(undefined, {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+}
+
+function fmtCost(c){ return c == null ? '' : '$' + c.toFixed(3); }
+function fmtDuration(s){ return s == null ? '' : s.toFixed(1) + 's'; }
+
+function verdictBadgeClass(v){
+  return 'badge badge-' + (v || 'blocked').toLowerCase();
+}
+
+function renderRunsList(){
+  runsListEl.innerHTML = '';
+  if (!runs.length) {
+    runsListEl.innerHTML = '<div class="empty">No runs yet. They\'ll appear here as the agent reviews PRs.</div>';
+    return;
+  }
+  for (const r of runs) {
+    const row = document.createElement('div');
+    row.className = 'run-row' + (r.run_id === activeRunId ? ' active' : '');
+    row.dataset.id = r.run_id;
+    const top = document.createElement('div');
+    top.className = 'run-top';
+    const badge = document.createElement('span');
+    badge.className = verdictBadgeClass(r.verdict);
+    badge.textContent = r.emoji + ' ' + r.score + '/5';
+    const scope = document.createElement('span');
+    scope.className = 'scope-tag scope-' + r.source;
+    scope.textContent = r.source;
+    const labelTag = document.createElement('span');
+    labelTag.className = 'label-tag label-' + (r.human_label || 'empty');
+    labelTag.textContent = r.human_label || 'unlabeled';
+    top.appendChild(badge);
+    top.appendChild(scope);
+    top.appendChild(labelTag);
+    const title = document.createElement('div');
+    title.className = 'run-title';
+    title.textContent = '#' + r.pr_number + ' ' + r.pr_title;
+    const meta = document.createElement('div');
+    meta.className = 'run-meta';
+    const parts = [r.pr_author, fmtTime(r.ts)];
+    if (r.duration_s != null) parts.push(fmtDuration(r.duration_s));
+    if (r.cost_usd != null) parts.push(fmtCost(r.cost_usd));
+    meta.textContent = parts.join(' · ');
+    row.appendChild(top);
+    row.appendChild(title);
+    row.appendChild(meta);
+    row.addEventListener('click', () => loadDetail(r.run_id));
+    runsListEl.appendChild(row);
+  }
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+
+function renderTrace(trace){
+  if (!trace || !trace.length) return '<em style="color:#999">No tool calls recorded.</em>';
+  return trace.map(t => {
+    const cls = t.kind === 'call' ? 'trace-call' : 'trace-return';
+    const arrow = t.kind === 'call' ? '→' : '←';
+    const body = t.kind === 'call'
+      ? t.tool + '(' + JSON.stringify(t.args) + ')'
+      : t.tool + ' returned: ' + (t.preview || '');
+    return '<div class="trace-item ' + cls + '">' + arrow + ' ' + escapeHtml(body) + '</div>';
+  }).join('');
+}
+
+// --- Full pydantic_ai message renderer ---------------------------------------
+// Same shape Logfire receives via `pydantic_ai.all_messages`. Each pydantic_ai
+// `ModelMessage` is `{kind: "request"|"response", parts: [...]}` — we flatten
+// and render one collapsible block per part. The shape comes verbatim from
+// `ModelMessagesTypeAdapter.dump_python(..., mode='json')` so the renderer
+// stays valid as long as pydantic_ai's schema does.
+
+function fmtBytes(n){
+  if (n < 1024) return n + 'B';
+  if (n < 1024*1024) return (n/1024).toFixed(1) + 'KB';
+  return (n/1024/1024).toFixed(2) + 'MB';
+}
+
+function prettyJson(value){
+  // Tool args sometimes come in as a JSON-string (the pydantic_ai schema
+  // permits both `dict` and `str` for ToolCallPart.args). Try to parse so
+  // the tree displays nested keys instead of one giant escaped line.
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+        (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try { return JSON.stringify(JSON.parse(trimmed), null, 2); }
+      catch (e) { /* fall through */ }
+    }
+    return value;
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function renderPart(part, idx, armId){
+  const kind = part.part_kind || part.kind || 'unknown';
+  let label = '';
+  let body = '';
+  // Coarse-grained dispatch on `part_kind`. Anything we don't recognize
+  // falls through to the JSON-dump branch below — keeps the renderer
+  // compatible with future pydantic_ai part types without code changes.
+  if (kind === 'system-prompt') {
+    label = 'system';
+    body = part.content || '';
+  } else if (kind === 'user-prompt') {
+    label = 'user';
+    body = typeof part.content === 'string' ? part.content : prettyJson(part.content);
+  } else if (kind === 'tool-call') {
+    label = 'tool_call · ' + (part.tool_name || '?');
+    body = prettyJson(part.args);
+  } else if (kind === 'tool-return') {
+    label = 'tool_return · ' + (part.tool_name || '?');
+    body = prettyJson(part.content);
+  } else if (kind === 'retry-prompt') {
+    label = 'retry · ' + (part.tool_name || '');
+    body = prettyJson(part.content);
+  } else if (kind === 'text') {
+    label = 'assistant text';
+    body = part.content || '';
+  } else {
+    label = kind;
+    body = prettyJson(part);
+  }
+  const bytes = body ? body.length : 0;
+  const cls = 'part part-' + kind;
+  // Every part collapsed by default. Use the "Expand all" button or
+  // click a header to drill in. Old behavior (everything expanded
+  // except system-prompt) overflowed the column on long tool returns.
+  return (
+    '<div class="' + cls + '">' +
+      '<div class="part-head" data-arm="' + armId + '" data-idx="' + idx + '">' +
+        '<span class="part-toggle">▶</span>' +
+        '<span class="part-kind">' + escapeHtml(kind) + '</span>' +
+        '<span class="part-name">' + escapeHtml(label) + '</span>' +
+        '<span class="part-bytes">' + fmtBytes(bytes) + '</span>' +
+      '</div>' +
+      '<div class="part-body collapsed"><pre>' + escapeHtml(body) + '</pre></div>' +
+    '</div>'
+  );
+}
+
+function renderArm(messages, armId){
+  if (!messages || !messages.length) {
+    return '<div class="trace-empty">No messages captured for this arm. (Pre-' +
+           'instrumentation record, or the agent didn\'t run for this arm.)</div>';
+  }
+  // Flatten pydantic_ai `ModelMessage[].parts[]` into one ordered list of parts.
+  const flat = [];
+  for (const msg of messages) {
+    for (const part of (msg.parts || [])) {
+      flat.push(part);
+    }
+  }
+  return flat.map((p, i) => renderPart(p, i, armId)).join('');
+}
+
+// Wire up the part-head click handler once at module scope. We use event
+// delegation so freshly-rendered parts (after switching arms) still toggle
+// without re-binding.
+document.addEventListener('click', (e) => {
+  const head = e.target.closest && e.target.closest('.part-head');
+  if (!head) return;
+  const body = head.nextElementSibling;
+  if (!body) return;
+  body.classList.toggle('collapsed');
+  const toggle = head.querySelector('.part-toggle');
+  if (toggle) toggle.textContent = body.classList.contains('collapsed') ? '▶' : '▼';
+});
+
+let activeArm = 'triage';
+
+function switchArm(arm, rec){
+  activeArm = arm;
+  const messages = (rec.messages && rec.messages[arm]) || [];
+  const armBox = document.getElementById('arm-body');
+  if (armBox) armBox.innerHTML = renderArm(messages, arm);
+  for (const btn of document.querySelectorAll('.arm-tab')) {
+    btn.classList.toggle('active', btn.dataset.arm === arm);
+  }
+}
+
+function logfireLink(rec){
+  if (!rec.logfire_trace_id) return '';
+  // Generic Logfire trace deep-link. Self-host users can set their own
+  // base via window.__LOGFIRE_BASE__ if they ever wire it through; the
+  // default "#" anchor is a safe no-op for the demo.
+  const base = window.__LOGFIRE_BASE__ || '#';
+  return ' · <a href="' + base + 'traces/' + rec.logfire_trace_id + '" target="_blank">Logfire trace ↗</a>';
+}
+
+function renderDetail(rec){
+  emptyDetailEl.style.display = 'none';
+  detailEl.style.display = 'block';
+  const card = rec.card || {};
+  const drilldown = renderDrilldownText(rec);
+
+  const tokenLine = (rec.tokens_in || rec.tokens_out)
+    ? ' · ' + (rec.tokens_in || 0).toLocaleString() + ' in / ' + (rec.tokens_out || 0).toLocaleString() + ' out'
+    : '';
+
+  const triageMsgs = (rec.messages && rec.messages.triage) || [];
+  const patternMsgs = (rec.messages && rec.messages.pattern) || [];
+
+  // Stripe-style layout: full-width header on top, two columns below.
+  // Left  = human-facing summary (card, drilldown, tool-trace skim).
+  // Right = tabbed: "Trace" (raw pydantic_ai messages, expandable) and
+  //         "Annotation" (label form + history). Tabs let the grader
+  //         toggle between reading what the agent did and recording
+  //         their judgment without scrolling between sections.
+  const labelTagText = rec.human_label || 'unlabeled';
+  detailEl.innerHTML = `
+    <div class="detail-header">
+      <div class="detail-head">
+        <h1>#${rec.pr_number} ${escapeHtml(rec.pr_title)}</h1>
+        <span class="${verdictBadgeClass(card.verdict)}">${card.emoji || ''} ${card.score}/5 ${card.verdict || ''}</span>
+      </div>
+      <div class="detail-meta">
+        <span>by ${escapeHtml(rec.pr_author)}</span>
+        <a href="${escapeHtml(rec.pr_url)}" target="_blank" class="pr-link">View on GitHub ↗</a>
+        <span>${fmtTime(rec.ts)} · ${fmtDuration(rec.duration_s)} · ${fmtCost(rec.cost_usd)}${tokenLine}</span>
+        <span>${escapeHtml(rec.model_name || '')}${logfireLink(rec)}</span>
+      </div>
+    </div>
+    <div class="detail-body">
+      <div class="detail-left">
+        <div class="section">
+          <h3>Card (what posted to Slack)</h3>
+          <div class="card-text">${escapeHtml(renderCardText(card))}</div>
+        </div>
+        <div class="section">
+          <h3>Drill-down</h3>
+          <div class="drilldown-text">${escapeHtml(drilldown)}</div>
+        </div>
+        <div class="section">
+          <h3>Tool trace (skim)</h3>
+          ${renderTrace(rec.tool_trace)}
+        </div>
+      </div>
+      <div class="detail-right">
+        <div class="right-tabs">
+          <button class="right-tab active" data-rtab="trace" type="button">
+            <span class="right-tag">Raw</span>Trace
+          </button>
+          <button class="right-tab" data-rtab="annotation" type="button">
+            Annotation
+            <span class="count label-${rec.human_label || 'empty'}">${escapeHtml(labelTagText)}</span>
+          </button>
+        </div>
+        <div class="right-pane" data-pane="trace">
+          <div class="trace-controls">
+            <div class="arm-tabs">
+              <button class="arm-tab active" data-arm="triage" type="button">Triage (${triageMsgs.length} msgs)</button>
+              <button class="arm-tab" data-arm="pattern" type="button" ${patternMsgs.length === 0 ? 'disabled' : ''}>Pattern (${patternMsgs.length} msgs)</button>
+            </div>
+            <button class="trace-toggle-all" id="toggle-all-btn" type="button">Expand all</button>
+          </div>
+          <div id="arm-body">${renderArm(triageMsgs, 'triage')}</div>
+        </div>
+        <div class="right-pane hidden" data-pane="annotation">
+          <div class="section label-form">
+            <h3>Your verdict</h3>
+            <label for="lbl">Label</label>
+            <select id="lbl">
+              <option value="">— unlabeled —</option>
+              <option value="ready"${rec.human_label === 'ready' ? ' selected' : ''}>ready (agent was right if it said READY)</option>
+              <option value="not_ready"${rec.human_label === 'not_ready' ? ' selected' : ''}>not_ready (PR is not ready for human review)</option>
+            </select>
+            <label for="notes">Notes (what would you have said? where does the agent disagree?)</label>
+            <textarea id="notes" placeholder="e.g. Agreed with READY but reviewer should call out the perf cost in line 42.">${escapeHtml(rec.human_notes || '')}</textarea>
+            <div class="label-buttons">
+              <button id="save-btn">Save label</button>
+              <button id="graduate-btn" class="secondary" title="Promote to eval_prs(set_name='graduated')">Graduate to eval set →</button>
+              <span id="status" class="status"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById('save-btn').addEventListener('click', () => saveLabel(rec.run_id));
+  document.getElementById('graduate-btn').addEventListener('click', () => graduate(rec.run_id));
+  for (const btn of document.querySelectorAll('.arm-tab')) {
+    btn.addEventListener('click', () => switchArm(btn.dataset.arm, rec));
+  }
+  for (const btn of document.querySelectorAll('.right-tab')) {
+    btn.addEventListener('click', () => switchRightTab(btn.dataset.rtab));
+  }
+  document.getElementById('toggle-all-btn').addEventListener('click', toggleAllParts);
+  activeArm = 'triage';
+}
+
+// Toggle every part-body in the active arm. Tracks state on the button
+// label so the next click flips. Only touches the currently-rendered
+// arm — switching arms re-renders fresh (collapsed) parts anyway.
+function toggleAllParts(){
+  const btn = document.getElementById('toggle-all-btn');
+  const expand = btn.textContent.startsWith('Expand');
+  const bodies = document.querySelectorAll('#arm-body .part-body');
+  for (const body of bodies) {
+    body.classList.toggle('collapsed', !expand);
+    const toggle = body.previousElementSibling && body.previousElementSibling.querySelector('.part-toggle');
+    if (toggle) toggle.textContent = expand ? '▼' : '▶';
+  }
+  btn.textContent = expand ? 'Collapse all' : 'Expand all';
+}
+
+function switchRightTab(name){
+  for (const btn of document.querySelectorAll('.right-tab')) {
+    btn.classList.toggle('active', btn.dataset.rtab === name);
+  }
+  for (const pane of document.querySelectorAll('.right-pane')) {
+    pane.classList.toggle('hidden', pane.dataset.pane !== name);
+  }
+}
+
+function renderCardText(card){
+  // Mirror render_card() server-side. Keeping this deterministic in JS
+  // avoids a round-trip just to render preformatted text.
+  const size = card.size_line ? '_' + card.size_line + '_\n\n' : '';
+  const failing = card.failing_line ? card.failing_line + '\n' : '';
+  return '*Triage Summary*\n' + (card.summary || '') + '\n\n' +
+    size +
+    '*Merge Confidence: ' + card.score + '/5*  ' + (card.emoji || '') + ' ' + (card.verdict || '') + '\n' +
+    failing +
+    (card.verdict_one_liner || '') + '\n\n' +
+    (card.justification || '');
+}
+
+function renderDrilldownText(rec){
+  // Mirror render_drilldown(). Best-effort — used as a quick visual; the
+  // canonical drilldown is what posted to Slack.
+  const t = rec.triage || {};
+  const p = rec.pattern || {};
+  const lines = ['*Drill-down*'];
+  if (t.has_merge_conflicts === true) {
+    lines.push('\n_Merge state_');
+    lines.push('  • merge conflicts — branch must be rebased before it can merge');
+  }
+  const r = t.failure_rationales || {};
+  function bullets(label, names){
+    if (!names || !names.length) return;
+    lines.push('\n_' + label + '_');
+    for (const n of names) {
+      const why = r[n] || '';
+      lines.push('  • ' + n + (why ? ' — ' + why : ''));
+    }
+  }
+  bullets('PR-related failures', t.pr_related_failures);
+  bullets('Unrelated failures', t.unrelated_failures);
+  bullets('Policy / meta failures (zero-penalty)', t.policy_meta_failures);
+  bullets('Still running', t.running_checks);
+  if (p.findings && p.findings.length) {
+    lines.push('\n_Pattern findings_');
+    for (const f of p.findings) {
+      const risk = f.risk && f.risk !== 'low' ? ' risk=' + f.risk : '';
+      lines.push('  • [' + f.severity + risk + '] `' + f.file + '` — ' + f.rationale + ' (source: ' + f.source + ', ' + f.citation + ')');
+    }
+  }
+  if (p.tech_debt && p.tech_debt.length) {
+    lines.push('\n_Tech debt (FYI, not blocking)_');
+    for (const td of p.tech_debt) {
+      lines.push('  • `' + td.code_path + '` vs `' + td.doc_path + '` — ' + td.note);
+    }
+  }
+  if (lines.length === 1) lines.push('Nothing to drill into. Card has the full story.');
+  return lines.join('\n');
+}
+
+async function loadDetail(runId){
+  activeRunId = runId;
+  history.replaceState(null, '', '/runs#' + runId);
+  renderRunsList();
+  try {
+    const r = await authFetch('/runs/api/runs/' + runId);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const rec = await r.json();
+    renderDetail(rec);
+  } catch (err) {
+    detailEl.style.display = 'block';
+    emptyDetailEl.style.display = 'none';
+    detailEl.innerHTML = '<div class="err">Failed to load: ' + escapeHtml(String(err)) + '</div>';
+  }
+}
+
+async function saveLabel(runId){
+  const status = document.getElementById('status');
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true;
+  status.className = 'status';
+  status.textContent = 'Saving…';
+  const lbl = document.getElementById('lbl').value || null;
+  const notes = document.getElementById('notes').value || null;
+  try {
+    const r = await authFetch('/runs/api/runs/' + runId + '/label', {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({human_label: lbl, human_notes: notes}),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + (await r.text()));
+    await refresh();
+    status.className = 'status ok';
+    status.textContent = 'Saved.';
+  } catch (err) {
+    status.className = 'status err';
+    status.textContent = String(err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function graduate(runId){
+  const status = document.getElementById('status');
+  const btn = document.getElementById('graduate-btn');
+  status.className = 'status';
+  status.textContent = '';
+  if (!confirm('Append this PR to tests/eval/pr_set_v3.json so the next eval run grades against it?')) return;
+  btn.disabled = true;
+  status.textContent = 'Graduating…';
+  try {
+    const r = await authFetch('/runs/api/runs/' + runId + '/graduate', {method:'POST'});
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error('HTTP ' + r.status + ': ' + t);
+    }
+    const data = await r.json();
+    status.className = 'status ok';
+    status.textContent = 'Added. pr_set_v3.json now has ' + data.total_prs + ' PR(s).';
+  } catch (err) {
+    status.className = 'status err';
+    status.textContent = String(err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function refresh(){
+  const r = await authFetch('/runs/api/runs');
+  runs = await r.json();
+  renderRunsList();
+}
+
+(async () => {
+  await refresh();
+  const hash = window.location.hash.replace(/^#/, '');
+  if (hash && runs.find(r => r.run_id === hash)) {
+    loadDetail(hash);
+  } else if (runs.length) {
+    loadDetail(runs[0].run_id);
+  }
+})();
+</script>
+</body></html>

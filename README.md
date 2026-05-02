@@ -2,6 +2,8 @@
 
 Small HTTP server that chats with GitHub PRs: triage + pattern review, powered by [pi-coding-agent](https://github.com/mariozechner/pi-coding-agent) and LiteLLM.
 
+<img width="2076" height="1812" alt="Xnapper-2026-05-01-19 53 59" src="https://github.com/user-attachments/assets/f61dda15-6dbb-4b0c-b714-5054bc1c4e97" />
+
 ## What you need
 
 - Node **≥20.6**

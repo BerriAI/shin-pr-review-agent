@@ -1274,7 +1274,11 @@ export async function reviewPr(
   };
 
   let triage: TriageReport | null = null;
-  let pattern: PatternReport | null = null;
+  // NOTE: pattern review is scoped out of the v0 deploy. We stub `pattern`
+  // with an empty PatternReport so downstream fuse/render/DB insert logic
+  // continues to work unchanged. Re-enable the parallel branch below to
+  // bring it back.
+  let pattern: PatternReport | null = PatternReportSchema.parse({});
   let triageTrace: ToolTraceEntry[] = [];
   let patternTrace: ToolTraceEntry[] = [];
   let triageErr = "";
@@ -1282,8 +1286,8 @@ export async function reviewPr(
   let triagePlainAppend = "";
   let patternPlainAppend = "";
 
-  log(`starting triage + pattern in parallel for ${prUrl}`);
-  // Run triage + pattern in parallel
+  log(`starting triage for ${prUrl} (pattern review disabled for v0)`);
+  // Run triage only. Pattern review is disabled for the v0 deploy.
   await Promise.all([
     (async () => {
       try {
@@ -1310,24 +1314,25 @@ export async function reviewPr(
         log(`triage: ERROR — ${e}`);
       }
     })(),
-    (async () => {
-      try {
-        const t0pat = Date.now();
-        const patternOut = await _patternSingleShot(prUrl, log);
-        const raw = extractLastJson(patternOut);
-        if (raw) {
-          pattern = PatternReportSchema.parse(raw);
-          log(`pattern: done ✓  ${((Date.now() - t0pat) / 1000).toFixed(1)}s`);
-        } else {
-          pattern = PatternReportSchema.parse({});
-          patternPlainAppend = patternOut.trim();
-          log("pattern: done (plain output)");
-        }
-      } catch (e) {
-        patternErr = String(e);
-        log(`pattern: ERROR — ${e}`);
-      }
-    })(),
+    // Pattern review — scoped out of the v0 deploy. Re-enable by un-commenting.
+    // (async () => {
+    //   try {
+    //     const t0pat = Date.now();
+    //     const patternOut = await _patternSingleShot(prUrl, log);
+    //     const raw = extractLastJson(patternOut);
+    //     if (raw) {
+    //       pattern = PatternReportSchema.parse(raw);
+    //       log(`pattern: done ✓  ${((Date.now() - t0pat) / 1000).toFixed(1)}s`);
+    //     } else {
+    //       pattern = PatternReportSchema.parse({});
+    //       patternPlainAppend = patternOut.trim();
+    //       log("pattern: done (plain output)");
+    //     }
+    //   } catch (e) {
+    //     patternErr = String(e);
+    //     log(`pattern: ERROR — ${e}`);
+    //   }
+    // })(),
   ]);
 
   const allTrace = [...triageTrace, ...patternTrace];

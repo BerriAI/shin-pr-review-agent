@@ -392,4 +392,6 @@ await db.initDb();
 await initRegistry();
 initSystemPrompts();
 
-app.listen(PORT);
+app.listen(PORT, () => {
+  console.log(`listening on http://localhost:${PORT}`);
+});

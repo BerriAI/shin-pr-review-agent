@@ -17,10 +17,10 @@ import * as db from "./db.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SKILLS_DIR = resolve(__dirname, "../skills");
-const GATHER_SCRIPT = resolve(__dirname, "../scripts/gather_pr_triage_data.py");
+const GATHER_SCRIPT = resolve(__dirname, "../scripts/gather_pr_triage_data.ts");
 const PATTERN_GATHER_SCRIPT = resolve(
   __dirname,
-  "../scripts/gather_pattern_local.py",
+  "../scripts/gather_pattern_local.ts",
 );
 
 // --- Pi SDK shared infra (initialised once) -----------------------------------
@@ -239,12 +239,13 @@ function loadSkill(name: string): string {
 
 // pathRedirect: tells the agent to invoke a concrete script path instead of the
 // placeholder `$CLAUDE_SKILL_DIR/scripts/<name>` reference in the upstream SKILL.md.
-// Matches the Python _redirect() function in app.py exactly.
+// The skill files reference the original Python script names; we redirect to the
+// TypeScript ports, which are run with `npx tsx`.
 function pathRedirect(scriptName: string, scriptPath: string): string {
   return (
     `TOOL USE: Wherever the instructions below say to run ` +
     `\`python \${CLAUDE_SKILL_DIR}/scripts/${scriptName} <ref>\`, ` +
-    `instead run \`python ${scriptPath} <ref>\` via bash. ` +
+    `instead run \`npx tsx ${scriptPath} <ref>\` via bash. ` +
     `It returns the same JSON shape the script would have printed.\n\n`
   );
 }
@@ -1167,7 +1168,7 @@ const _MAX_PROMPT = 12_000;
 function _runGatherLocal(prUrl: string, log: (m: string) => void): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     log("pattern: running local gather");
-    const child = spawn("python3", [PATTERN_GATHER_SCRIPT, prUrl], { env: { ...process.env } });
+    const child = spawn("npx", ["tsx", PATTERN_GATHER_SCRIPT, prUrl], { env: { ...process.env } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });

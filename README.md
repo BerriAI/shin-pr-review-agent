@@ -18,9 +18,9 @@ when `POST_COMMENTS=true`, the agent posts its review directly as a GitHub PR co
 
 ## How it works
 
-Two Python scripts gather context before the agent runs. No `GITHUB_TOKEN` needed — all GitHub API calls go through the LiteLLM MCP proxy.
+Two TypeScript scripts gather context before the agent runs. No `GITHUB_TOKEN` needed — all GitHub API calls go through the LiteLLM MCP proxy.
 
-**Triage pass** (`scripts/gather_pr_triage_data.py`)
+**Triage pass** (`scripts/gather_pr_triage_data.ts`)
 
 Fetches PR metadata and the per-file diff, then resolves all CI check runs (GitHub Actions + CircleCI + classic status API). For each failing check it pulls:
 
@@ -30,7 +30,7 @@ Fetches PR metadata and the per-file diff, then resolves all CI check runs (GitH
 
 Also extracts the [Greptile](https://greptile.com) confidence score from PR comments if present.
 
-**Pattern pass** (`scripts/gather_pattern_local.py`)
+**Pattern pass** (`scripts/gather_pattern_local.ts`)
 
 Uses a local git clone — one `git fetch`, no API rate limits. Diffs the PR against `main`, then for each changed file:
 

@@ -498,7 +498,6 @@ const PATTERN_OUTPUT_OVERRIDE =
 // --- System prompt assembly ---------------------------------------------------
 
 let TRIAGE_SYSTEM: string;
-let PATTERN_SYSTEM: string;
 let KARPATHY_SYSTEM: string;
 let CHAT_SYSTEM: string;
 let PATTERN_SYSTEM_SINGLE_SHOT: string;
@@ -513,12 +512,6 @@ export function initSystemPrompts(): void {
     triageSkill +
     "\n\n" +
     TRIAGE_OUTPUT_OVERRIDE;
-
-  PATTERN_SYSTEM =
-    pathRedirect("gather_pattern_data.py", PATTERN_GATHER_SCRIPT) +
-    patternSkill +
-    "\n\n" +
-    PATTERN_OUTPUT_OVERRIDE;
 
   PATTERN_SYSTEM_SINGLE_SHOT =
     "All context is pre-loaded below — do NOT call any tool or run bash. " +
@@ -1273,7 +1266,10 @@ export async function reviewPr(
     opts.onProgress?.(msg);
   };
 
-  let triage: TriageReport | null = null;
+  // The `as ... | null` cast prevents TS from narrowing the closure-mutated
+  // value to literal `null`, which would make `triage?.pr_number` resolve to
+  // `never` after the await below.
+  let triage = null as TriageReport | null;
   // NOTE: pattern review is scoped out of the v0 deploy. We stub `pattern`
   // with an empty PatternReport so downstream fuse/render/DB insert logic
   // continues to work unchanged. Re-enable the parallel branch below to
@@ -1554,7 +1550,7 @@ export function getThread(threadId: string): Thread | undefined {
 export function deleteThread(threadId: string): boolean {
   const t = THREADS.get(threadId);
   if (!t) return false;
-  t.agent.dispose?.();
+  t.agent?.dispose?.();
   return THREADS.delete(threadId);
 }
 

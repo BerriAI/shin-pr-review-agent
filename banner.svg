@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d1117;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#161b22;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#21262d;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#161b22;stop-opacity:1" />
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#58a6ff" />
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="400" fill="url(#bg)" />
+
+  <!-- Subtle grid -->
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#21262d" stroke-width="0.5"/>
+  </pattern>
+  <rect width="1200" height="400" fill="url(#grid)" opacity="0.5"/>
+
+  <!-- Title -->
+  <text x="600" y="72" font-family="'SF Mono', 'Fira Code', monospace" font-size="42" font-weight="700"
+        fill="#e6edf3" text-anchor="middle" filter="url(#glow)">shin-pr-review-agent</text>
+
+  <!-- Subtitle -->
+  <text x="600" y="108" font-family="'SF Mono', 'Fira Code', monospace" font-size="16"
+        fill="#8b949e" text-anchor="middle">powered by pi-coding-agent + LiteLLM</text>
+
+  <!-- ── Card: GitHub PR ── -->
+  <rect x="90" y="155" width="200" height="130" rx="10" fill="url(#cardGrad)" stroke="#30363d" stroke-width="1.5"/>
+  <!-- PR icon -->
+  <circle cx="160" cy="195" r="12" fill="none" stroke="#3fb950" stroke-width="2"/>
+  <line x1="160" y1="183" x2="160" y2="179" stroke="#3fb950" stroke-width="2"/>
+  <circle cx="160" cy="175" r="5" fill="#3fb950"/>
+  <circle cx="160" cy="221" r="5" fill="#3fb950"/>
+  <path d="M172 195 Q185 195 185 208 Q185 221 172 221" fill="none" stroke="#3fb950" stroke-width="2"/>
+  <circle cx="172" cy="221" r="0" fill="#3fb950"/>
+  <text x="190" y="192" font-family="'SF Mono', monospace" font-size="13" fill="#e6edf3">Pull</text>
+  <text x="190" y="208" font-family="'SF Mono', monospace" font-size="13" fill="#e6edf3">Request</text>
+  <text x="155" y="258" font-family="'SF Mono', monospace" font-size="12" fill="#8b949e" text-anchor="middle">GitHub PR</text>
+  <text x="155" y="274" font-family="'SF Mono', monospace" font-size="11" fill="#6e7681" text-anchor="middle">any repo</text>
+
+  <!-- Arrow 1 -->
+  <line x1="295" y1="220" x2="390" y2="220" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6,3"/>
+
+  <!-- ── Card: Agent ── -->
+  <rect x="395" y="155" width="200" height="130" rx="10" fill="url(#cardGrad)" stroke="#58a6ff" stroke-width="1.5"/>
+  <!-- Robot icon -->
+  <rect x="455" y="175" width="40" height="32" rx="5" fill="none" stroke="#58a6ff" stroke-width="2"/>
+  <circle cx="465" cy="188" r="4" fill="#58a6ff"/>
+  <circle cx="480" cy="188" r="4" fill="#58a6ff"/>
+  <rect x="462" y="196" width="10" height="3" rx="1" fill="#58a6ff"/>
+  <rect x="474" y="196" width="10" height="3" rx="1" fill="#58a6ff"/>
+  <line x1="475" y1="175" x2="475" y2="168" stroke="#58a6ff" stroke-width="2"/>
+  <circle cx="475" cy="164" r="4" fill="#58a6ff"/>
+  <rect x="447" y="207" width="10" height="18" rx="3" fill="none" stroke="#58a6ff" stroke-width="1.5"/>
+  <rect x="493" y="207" width="10" height="18" rx="3" fill="none" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="495" y="258" font-family="'SF Mono', monospace" font-size="12" fill="#8b949e" text-anchor="middle">Agent</text>
+  <text x="495" y="274" font-family="'SF Mono', monospace" font-size="11" fill="#6e7681" text-anchor="middle">pi-coding-agent</text>
+
+  <!-- Arrow 2 -->
+  <line x1="600" y1="220" x2="695" y2="220" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6,3"/>
+
+  <!-- ── Card: Review Report ── -->
+  <rect x="700" y="155" width="200" height="130" rx="10" fill="url(#cardGrad)" stroke="#30363d" stroke-width="1.5"/>
+  <!-- Doc icon -->
+  <rect x="757" y="172" width="36" height="44" rx="3" fill="none" stroke="#f0883e" stroke-width="2"/>
+  <path d="M781 172 L793 184 L781 184 Z" fill="#f0883e" opacity="0.3"/>
+  <path d="M781 172 L793 184" fill="none" stroke="#f0883e" stroke-width="1.5"/>
+  <line x1="763" y1="192" x2="787" y2="192" stroke="#f0883e" stroke-width="1.5"/>
+  <line x1="763" y1="200" x2="787" y2="200" stroke="#f0883e" stroke-width="1.5" opacity="0.6"/>
+  <line x1="763" y1="208" x2="778" y2="208" stroke="#f0883e" stroke-width="1.5" opacity="0.4"/>
+  <!-- Score badge -->
+  <rect x="795" y="185" width="32" height="20" rx="10" fill="#f0883e" opacity="0.9"/>
+  <text x="811" y="199" font-family="'SF Mono', monospace" font-size="11" fill="#0d1117" text-anchor="middle" font-weight="700">4/5</text>
+  <text x="800" y="258" font-family="'SF Mono', monospace" font-size="12" fill="#8b949e" text-anchor="middle">Review Report</text>
+  <text x="800" y="274" font-family="'SF Mono', monospace" font-size="11" fill="#6e7681" text-anchor="middle">scored + stored</text>
+
+  <!-- ── Bottom labels ── -->
+  <text x="155" y="318" font-family="-apple-system, sans-serif" font-size="13" fill="#6e7681" text-anchor="middle">Accepts PR URLs</text>
+  <text x="495" y="318" font-family="-apple-system, sans-serif" font-size="13" fill="#6e7681" text-anchor="middle">Understands context</text>
+  <text x="800" y="318" font-family="-apple-system, sans-serif" font-size="13" fill="#6e7681" text-anchor="middle">Creates actionable reviews</text>
+
+  <!-- Dot indicators -->
+  <circle cx="155" cy="340" r="4" fill="#3fb950"/>
+  <circle cx="495" cy="340" r="4" fill="#58a6ff"/>
+  <circle cx="800" cy="340" r="4" fill="#f0883e"/>
+
+  <!-- Right side pill: optional -->
+  <rect x="980" y="155" width="180" height="130" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1" stroke-dasharray="5,3"/>
+  <text x="1070" y="195" font-family="'SF Mono', monospace" font-size="11" fill="#6e7681" text-anchor="middle">optional</text>
+  <text x="1070" y="218" font-family="'SF Mono', monospace" font-size="13" fill="#8b949e" text-anchor="middle">POST_COMMENTS</text>
+  <text x="1070" y="236" font-family="-apple-system, sans-serif" font-size="12" fill="#6e7681" text-anchor="middle">posts review to PR</text>
+  <line x1="905" y1="220" x2="975" y2="220" stroke="#30363d" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrow)"/>
+</svg>

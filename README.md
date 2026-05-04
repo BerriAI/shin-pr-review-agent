@@ -9,7 +9,7 @@ when `POST_COMMENTS=true`, the agent posts its review directly as a GitHub PR co
 ## Features
 
 - accepts PR URLs via chat UI, API, or OpenAI-compatible endpoint
-- runs two gather passes (triage + pattern) then feeds both into the agent
+- runs triage + pattern review pipeline via pi-coding-agent
 - stores all review runs in Postgres for history and replay
 - serves a `/chat` UI and a `/runs` history view
 - exposes `POST /v1/chat/completions` (OpenAI-shaped) for machine callers

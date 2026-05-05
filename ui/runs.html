@@ -934,7 +934,7 @@ function setView(view) {
   document.getElementById('backfill-status').style.display = isRuns ? '' : 'none';
   document.getElementById('staging-controls').style.display = isRuns ? 'none' : 'flex';
   document.getElementById('runs-list').style.display = isRuns ? '' : 'none';
-  document.getElementById('staging-prs-list').style.display = isRuns ? 'none' : '';
+  document.getElementById('staging-prs-list').style.display = isRuns ? 'none' : 'block';
   document.getElementById('sidebar-title').textContent = isRuns ? 'Agent runs' : 'Staging PRs';
   if (!isRuns) {
     emptyDetailEl.style.display = 'flex';

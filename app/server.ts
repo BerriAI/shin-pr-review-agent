@@ -194,9 +194,16 @@ app.post("/webhook/github", (req, res) => {
   const sig = Array.isArray(sigRaw) ? sigRaw[0] : sigRaw;
   const eventRaw = req.headers["x-github-event"];
   const event = Array.isArray(eventRaw) ? eventRaw[0] : eventRaw;
+  const deliveryRaw = req.headers["x-github-delivery"];
+  const delivery = Array.isArray(deliveryRaw) ? deliveryRaw[0] : deliveryRaw;
+
+  console.log(
+    `[webhook] received event=${event} delivery=${delivery} sigPresent=${Boolean(sig)}`,
+  );
 
   if (GITHUB_WEBHOOK_SECRET) {
     if (!sig) {
+      console.warn(`[webhook] delivery=${delivery} missing signature`);
       res.status(401).json({ error: "missing signature" });
       return;
     }
@@ -205,65 +212,125 @@ app.post("/webhook/github", (req, res) => {
       !rawBody ||
       !verifyGithubSignature(rawBody, sig, GITHUB_WEBHOOK_SECRET)
     ) {
+      console.warn(
+        `[webhook] delivery=${delivery} invalid signature (rawBodyPresent=${Boolean(rawBody)})`,
+      );
       res.status(401).json({ error: "invalid signature" });
       return;
     }
   }
 
   if (event !== "issue_comment") {
+    console.log(
+      `[webhook] delivery=${delivery} skipping: not an issue_comment (event=${event})`,
+    );
     res.json({ skipped: true, reason: `event=${event}` });
     return;
   }
 
   const payload = req.body as {
     action?: string;
-    comment?: { user?: { login?: string } };
+    comment?: {
+      id?: number;
+      user?: { login?: string };
+      created_at?: string;
+      updated_at?: string;
+      body?: string;
+    };
     issue?: { number?: number; pull_request?: unknown; state?: string };
     repository?: { full_name?: string };
     installation?: { id?: number };
   };
 
   const action = payload.action ?? "";
+  const commentId = payload.comment?.id;
+  const commentLogin = payload.comment?.user?.login;
+  const commentCreatedAt = payload.comment?.created_at;
+  const commentUpdatedAt = payload.comment?.updated_at;
+  const commentBodyLen = payload.comment?.body?.length ?? 0;
+  const issueNumber = payload.issue?.number;
+  const issueState = payload.issue?.state;
+  const isPr = Boolean(payload.issue?.pull_request);
+  const repoFullNameRaw = payload.repository?.full_name;
+  const installationIdRaw = payload.installation?.id;
+
+  console.log(
+    `[webhook] delivery=${delivery} payload action=${action} commentId=${commentId} commentLogin=${commentLogin} ` +
+      `commentCreatedAt=${commentCreatedAt} commentUpdatedAt=${commentUpdatedAt} bodyLen=${commentBodyLen} ` +
+      `issue=#${issueNumber} issueState=${issueState} isPr=${isPr} repo=${repoFullNameRaw} installationId=${installationIdRaw}`,
+  );
+
   if (!["created", "edited"].includes(action)) {
+    console.log(
+      `[webhook] delivery=${delivery} skipping: action=${action} not in [created,edited]`,
+    );
     res.json({ skipped: true, reason: `action=${action}` });
     return;
   }
-  if (payload.comment?.user?.login !== "greptile-apps[bot]") {
+  if (commentLogin !== "greptile-apps[bot]") {
+    console.log(
+      `[webhook] delivery=${delivery} skipping: commentLogin=${commentLogin} (not greptile)`,
+    );
     res.json({ skipped: true, reason: "not greptile" });
     return;
   }
-  if (!payload.issue?.pull_request) {
+  if (!isPr) {
+    console.log(
+      `[webhook] delivery=${delivery} skipping: issue #${issueNumber} is not a PR`,
+    );
     res.json({ skipped: true, reason: "not a PR comment" });
     return;
   }
-  if (payload.issue.state !== "open") {
+  if (issueState !== "open") {
+    console.log(
+      `[webhook] delivery=${delivery} skipping: PR #${issueNumber} state=${issueState}`,
+    );
     res.json({ skipped: true, reason: "PR not open" });
     return;
   }
 
-  const prNumber = payload.issue.number;
-  const repoFullName = payload.repository?.full_name;
-  const installationId = payload.installation?.id;
+  const prNumber = issueNumber;
+  const repoFullName = repoFullNameRaw;
+  const installationId = installationIdRaw;
 
   if (!prNumber || !repoFullName || !installationId) {
+    console.warn(
+      `[webhook] delivery=${delivery} missing fields: prNumber=${prNumber} repo=${repoFullName} installationId=${installationId}`,
+    );
     res
       .status(400)
       .json({ error: "missing prNumber, repoFullName, or installationId" });
     return;
   }
 
+  const isEdit = action === "edited";
+  console.log(
+    `[webhook] delivery=${delivery} accepted: PR #${prNumber} repo=${repoFullName} action=${action} isEdit=${isEdit} commentId=${commentId} -> queueing async review`,
+  );
+
   res.status(202).json({ ok: true, queued: true });
 
   (async () => {
+    const t0 = Date.now();
+    console.log(
+      `[webhook] delivery=${delivery} async start: PR #${prNumber} repo=${repoFullName}`,
+    );
     const token = await getInstallationToken(installationId);
     const pr = await fetchPr(token, repoFullName, prNumber);
+    console.log(
+      `[webhook] delivery=${delivery} fetched PR #${prNumber}: state=${pr.state} draft=${pr.draft} headSha=${pr.head.sha}`,
+    );
 
     if (pr.state !== "open") {
-      console.log(`[webhook] PR #${prNumber} no longer open, skipping`);
+      console.log(
+        `[webhook] delivery=${delivery} PR #${prNumber} no longer open (state=${pr.state}), skipping`,
+      );
       return;
     }
     if (pr.draft) {
-      console.log(`[webhook] PR #${prNumber} is draft, skipping`);
+      console.log(
+        `[webhook] delivery=${delivery} PR #${prNumber} is draft, skipping`,
+      );
       return;
     }
 
@@ -272,19 +339,28 @@ app.post("/webhook/github", (req, res) => {
       pr.head.sha,
       repoFullName,
     );
+    console.log(
+      `[webhook] delivery=${delivery} claimWebhookReview PR #${prNumber} sha=${pr.head.sha} claimed=${claimed}`,
+    );
     if (!claimed) {
       console.log(
-        `[webhook] PR #${prNumber} sha=${pr.head.sha} already reviewed, skipping`,
+        `[webhook] delivery=${delivery} PR #${prNumber} sha=${pr.head.sha} already reviewed, skipping (action=${action} commentId=${commentId})`,
       );
       return;
     }
 
     console.log(
-      `[webhook] triggering review for ${pr.html_url} sha=${pr.head.sha}`,
+      `[webhook] delivery=${delivery} triggering review for ${pr.html_url} sha=${pr.head.sha} (action=${action} commentId=${commentId})`,
     );
     await reviewPr(pr.html_url, { source: "webhook" });
+    console.log(
+      `[webhook] delivery=${delivery} review complete for PR #${prNumber} sha=${pr.head.sha} elapsedMs=${Date.now() - t0}`,
+    );
   })().catch((err) => {
-    console.error(`[webhook] failed for PR #${prNumber}:`, err);
+    console.error(
+      `[webhook] delivery=${delivery} failed for PR #${prNumber}:`,
+      err,
+    );
   });
 });
 

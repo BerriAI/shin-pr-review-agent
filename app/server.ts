@@ -291,6 +291,23 @@ async function mergePrToAgentBranch(
     ? pr.head.sha
     : ((await mergeR.json()) as { sha: string }).sha;
   const stagingPr = await ensureStagingPr(token, repoFullName, agentBranch, defaultBranch);
+
+  // Comment on the original PR so its status is visible on GitHub
+  // (POST /merges doesn't close the source PR — GitHub only auto-closes
+  // when merged into the PR's own base branch)
+  await fetch(`https://api.github.com/repos/${repoFullName}/issues/${prNumber}/comments`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      body: `🤖 **litellm-agent**: This PR's commits have been merged into the staging branch \`${agentBranch}\`.\n\nStaging PR: ${stagingPr.html_url}`,
+    }),
+  }).catch((err) => console.warn(`[merge] comment on PR #${prNumber} failed:`, err));
+
   return {
     merge_commit_sha,
     branch: agentBranch,

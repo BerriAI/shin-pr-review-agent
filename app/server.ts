@@ -459,6 +459,318 @@ app.get("/api/models", requireLogin, (_req, res) => {
 
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
+// --- OpenAPI / Swagger docs ---------------------------------------------------
+
+const openApiSpec = {
+  openapi: "3.0.3",
+  info: { title: "PI PR Review Agent", version: "0.1.0", description: "PR review agent API" },
+  components: {
+    securitySchemes: {
+      bearerAuth: { type: "http", scheme: "bearer" },
+      cookieAuth: { type: "apiKey", in: "cookie", name: "litellm_bot_session" },
+    },
+    schemas: {
+      Thread: {
+        type: "object",
+        properties: {
+          id: { type: "string" }, title: { type: "string" }, updated_at: { type: "string" },
+          turns: { type: "array", items: { type: "object" } },
+        },
+      },
+      Run: {
+        type: "object",
+        properties: {
+          run_id: { type: "string" }, ts: { type: "number" }, pr_url: { type: "string" },
+          pr_number: { type: "integer" }, pr_title: { type: "string" }, pr_author: { type: "string" },
+          score: { type: "number" }, verdict: { type: "string" }, emoji: { type: "string" },
+          verdict_one_liner: { type: "string" }, duration_s: { type: "number" },
+          cost_usd: { type: "number" }, human_label: { type: "string" }, source: { type: "string" },
+        },
+      },
+      EvalPr: {
+        type: "object",
+        properties: {
+          id: { type: "integer" }, url: { type: "string" }, set_name: { type: "string" },
+          repo: { type: "string" }, category: { type: "string" }, notes: { type: "string" },
+          human_label: { type: "string" }, human_notes: { type: "string" }, source_run_id: { type: "string" },
+        },
+      },
+      Error: { type: "object", properties: { error: { type: "string" } } },
+    },
+  },
+  security: [{ bearerAuth: [] }, { cookieAuth: [] }],
+  paths: {
+    "/healthz": {
+      get: {
+        tags: ["Health"], summary: "Health check", security: [],
+        responses: { "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" } } } } } } },
+      },
+    },
+    "/webhook/github": {
+      post: {
+        tags: ["Webhooks"], summary: "GitHub webhook receiver", security: [],
+        description: "Receives GitHub pull_request events. Triggers PR review on opened/synchronize/reopened.",
+        parameters: [
+          { name: "x-hub-signature-256", in: "header", schema: { type: "string" }, description: "HMAC SHA-256 signature (required if GITHUB_WEBHOOK_SECRET set)" },
+          { name: "x-github-event", in: "header", required: true, schema: { type: "string" } },
+        ],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
+        responses: {
+          "202": { description: "Accepted — review triggered" },
+          "200": { description: "Skipped (wrong event/action or draft)" },
+          "400": { description: "Bad request" },
+          "401": { description: "Invalid/missing signature" },
+        },
+      },
+    },
+    "/login": {
+      post: {
+        tags: ["Auth"], summary: "Session login", security: [],
+        requestBody: { required: true, content: { "application/x-www-form-urlencoded": { schema: { type: "object", required: ["username", "password"], properties: { username: { type: "string" }, password: { type: "string" } } } } } },
+        responses: { "302": { description: "Redirect to /chat on success" }, "401": { description: "Invalid credentials" } },
+      },
+    },
+    "/logout": {
+      post: {
+        tags: ["Auth"], summary: "Session logout",
+        responses: { "302": { description: "Redirect to /login" } },
+      },
+    },
+    "/chat/api/threads": {
+      get: {
+        tags: ["Chat"], summary: "List all chat threads",
+        responses: { "200": { description: "Array of threads", content: { "application/json": { schema: { type: "array", items: { "$ref": "#/components/schemas/Thread" } } } } } },
+      },
+      post: {
+        tags: ["Chat"], summary: "Create new chat thread",
+        responses: { "200": { description: "Created thread", content: { "application/json": { schema: { "$ref": "#/components/schemas/Thread" } } } } },
+      },
+    },
+    "/chat/api/threads/{id}": {
+      parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+      get: {
+        tags: ["Chat"], summary: "Get thread by ID",
+        responses: {
+          "200": { description: "Thread", content: { "application/json": { schema: { "$ref": "#/components/schemas/Thread" } } } },
+          "404": { description: "Not found", content: { "application/json": { schema: { "$ref": "#/components/schemas/Error" } } } },
+        },
+      },
+      delete: {
+        tags: ["Chat"], summary: "Delete thread by ID",
+        responses: {
+          "200": { description: "Deleted", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" } } } } } },
+          "404": { description: "Not found" },
+        },
+      },
+    },
+    "/chat/api": {
+      post: {
+        tags: ["Chat"], summary: "Send chat message (non-streaming)",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["message"], properties: { message: { type: "string" }, thread_id: { type: "string" }, title: { type: "string" } } } } },
+        },
+        responses: {
+          "200": { description: "Agent response", content: { "application/json": { schema: { type: "object", properties: { output: { type: "string" }, tool_trace: { type: "array", items: { type: "object" } }, thread_id: { type: "string" }, available_tools: { type: "array", items: { type: "string" } } } } } } },
+          "400": { description: "Empty message" },
+        },
+      },
+    },
+    "/chat/stream": {
+      post: {
+        tags: ["Chat"], summary: "Send chat message (SSE streaming)",
+        description: "Returns Server-Sent Events stream. Events: delta, tool_start, tool_end, done, error.",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["message"], properties: { message: { type: "string" }, thread_id: { type: "string" }, title: { type: "string" } } } } },
+        },
+        responses: {
+          "200": { description: "SSE stream", content: { "text/event-stream": { schema: { type: "string" } } } },
+          "400": { description: "Empty message" },
+        },
+      },
+    },
+    "/v1/chat/completions": {
+      post: {
+        tags: ["OpenAI-compat"], summary: "OpenAI-compatible chat completions",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object", required: ["messages"],
+                properties: {
+                  messages: { type: "array", items: { type: "object", properties: { role: { type: "string" }, content: { oneOf: [{ type: "string" }, { type: "array", items: { type: "object" } }] } } } },
+                  session_id: { type: "string" }, title: { type: "string" }, model: { type: "string" }, stream: { type: "boolean" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "OpenAI-format completion response" },
+          "400": { description: "No user turn" },
+          "500": { description: "Agent error" },
+        },
+      },
+    },
+    "/runs/api/runs": {
+      get: {
+        tags: ["Runs"], summary: "List runs (last 500)",
+        responses: { "200": { description: "Array of run summaries", content: { "application/json": { schema: { type: "array", items: { "$ref": "#/components/schemas/Run" } } } } } },
+      },
+    },
+    "/runs/api/runs/{id}": {
+      parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+      get: {
+        tags: ["Runs"], summary: "Get run by ID (full detail)",
+        responses: {
+          "200": { description: "Run detail", content: { "application/json": { schema: { "$ref": "#/components/schemas/Run" } } } },
+          "404": { description: "Not found" },
+        },
+      },
+    },
+    "/runs/api/runs/{id}/label": {
+      parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+      post: {
+        tags: ["Runs"], summary: "Label a run",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { human_label: { type: "string", enum: ["ready", "not_ready", null] }, human_notes: { type: "string" } } } } } },
+        responses: {
+          "200": { description: "Updated run" },
+          "400": { description: "Invalid label value" },
+          "404": { description: "Run not found" },
+        },
+      },
+    },
+    "/runs/api/runs/{id}/annotations": {
+      parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+      get: {
+        tags: ["Runs"], summary: "List annotations for a run",
+        responses: { "200": { description: "Array of annotations" } },
+      },
+    },
+    "/runs/api/runs/{id}/graduate": {
+      parameters: [
+        { name: "id", in: "path", required: true, schema: { type: "string" } },
+        { name: "set_name", in: "query", schema: { type: "string", default: "graduated" } },
+      ],
+      post: {
+        tags: ["Runs"], summary: "Graduate a labeled run into an eval set",
+        responses: {
+          "200": { description: "Graduated", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, set_name: { type: "string" }, eval_pr_id: { type: "integer" }, url: { type: "string" } } } } } },
+          "400": { description: "Run not yet labeled" },
+          "404": { description: "Run not found" },
+        },
+      },
+    },
+    "/api/v1/runs/export": {
+      get: {
+        tags: ["Runs"], summary: "Export runs as NDJSON",
+        parameters: [
+          { name: "label_state", in: "query", schema: { type: "string", enum: ["labeled", "unlabeled", "all"] } },
+          { name: "source", in: "query", schema: { type: "string" } },
+          { name: "since", in: "query", schema: { type: "number" }, description: "Unix epoch float" },
+        ],
+        responses: { "200": { description: "NDJSON stream", content: { "application/x-ndjson": { schema: { type: "string" } } } } },
+      },
+    },
+    "/api/v1/eval-sets": {
+      get: {
+        tags: ["Eval Sets"], summary: "List all eval sets",
+        responses: { "200": { description: "Array of eval set names" } },
+      },
+    },
+    "/api/v1/eval-sets/{name}/prs": {
+      parameters: [{ name: "name", in: "path", required: true, schema: { type: "string" } }],
+      get: {
+        tags: ["Eval Sets"], summary: "List PRs in an eval set",
+        responses: { "200": { description: "Array of eval PRs", content: { "application/json": { schema: { type: "array", items: { "$ref": "#/components/schemas/EvalPr" } } } } } },
+      },
+      post: {
+        tags: ["Eval Sets"], summary: "Add PR to eval set",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["url"], properties: { url: { type: "string" }, repo: { type: "string" }, category: { type: "string" }, notes: { type: "string" }, human_label: { type: "string" }, human_notes: { type: "string" }, source_run_id: { type: "string" } } } } },
+        },
+        responses: { "200": { description: "Upserted eval PR", content: { "application/json": { schema: { "$ref": "#/components/schemas/EvalPr" } } } }, "400": { description: "url required" } },
+      },
+    },
+    "/api/v1/eval-sets/{name}/prs/{id}": {
+      parameters: [
+        { name: "name", in: "path", required: true, schema: { type: "string" } },
+        { name: "id", in: "path", required: true, schema: { type: "integer" } },
+      ],
+      patch: {
+        tags: ["Eval Sets"], summary: "Update eval PR",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { category: { type: "string" }, notes: { type: "string" }, human_label: { type: "string" }, human_notes: { type: "string" } } } } } },
+        responses: { "200": { description: "Updated eval PR" }, "404": { description: "Not found" } },
+      },
+      delete: {
+        tags: ["Eval Sets"], summary: "Delete eval PR",
+        responses: { "200": { description: "Deleted" }, "404": { description: "Not found" } },
+      },
+    },
+    "/api/v1/eval-sets/{name}/download": {
+      parameters: [{ name: "name", in: "path", required: true, schema: { type: "string" } }],
+      get: {
+        tags: ["Eval Sets"], summary: "Download eval set as JSON array",
+        responses: { "200": { description: "JSON array of eval PRs" } },
+      },
+    },
+    "/api/models": {
+      get: {
+        tags: ["Models"], summary: "List available models",
+        responses: { "200": { description: "Model list", content: { "application/json": { schema: { type: "object", properties: { models: { type: "array", items: { type: "object", properties: { provider: { type: "string" }, id: { type: "string" }, name: { type: "string" } } } } } } } } } },
+      },
+    },
+    "/openapi.json": {
+      get: {
+        tags: ["Docs"], summary: "OpenAPI spec (JSON)", security: [],
+        responses: { "200": { description: "OpenAPI 3.0 spec" } },
+      },
+    },
+    "/api-docs": {
+      get: {
+        tags: ["Docs"], summary: "Swagger UI", security: [],
+        responses: { "200": { description: "Interactive API docs" } },
+      },
+    },
+  },
+};
+
+app.get("/openapi.json", (_req, res) => {
+  res.setHeader("Content-Type", "application/json");
+  res.json(openApiSpec);
+});
+
+app.get("/api-docs", (_req, res) => {
+  res.setHeader("Content-Type", "text/html");
+  res.send(`<!doctype html>
+<html>
+<head>
+  <title>PI PR Review Agent — API Docs</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" >
+</head>
+<body>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>
+  window.onload = function() {
+    SwaggerUIBundle({
+      url: "/openapi.json",
+      dom_id: '#swagger-ui',
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      layout: "BaseLayout",
+      deepLinking: true,
+    })
+  }
+</script>
+</body>
+</html>`);
+});
+
 // --- Startup ------------------------------------------------------------------
 
 const PORT = Number(process.env.PORT) || 8081;

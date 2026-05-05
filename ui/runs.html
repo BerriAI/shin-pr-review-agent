@@ -11,10 +11,21 @@
   html,body{margin:0;padding:0}
   body{font:14px/1.5 -apple-system,system-ui,sans-serif;color:#222;background:#fafafa;padding-left:380px}
   #sidebar{position:fixed;top:0;left:0;width:380px;height:100vh;border-right:1px solid #ddd;background:#f5f5f7;display:flex;flex-direction:column;z-index:5}
-  #sidebar-head{padding:12px 14px;border-bottom:1px solid #e0e0e3;display:flex;gap:8px;align-items:center}
+  #sidebar-head{padding:12px 14px;border-bottom:1px solid #e0e0e3;display:flex;flex-direction:column;gap:8px}
+  #sidebar-head-top{display:flex;gap:8px;align-items:center}
   #sidebar-head h2{font-size:13px;margin:0;flex:1;color:#333}
   #nav-link{font-size:12px;color:#06c;text-decoration:none;padding:4px 8px;border:1px solid #ddd;border-radius:4px;background:#fff}
   #nav-link:hover{background:#eef}
+  #backfill-row{display:flex;gap:6px;align-items:center}
+  #backfill-limit{width:52px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font:inherit;font-size:12px;text-align:center}
+  #backfill-btn{flex:1;padding:5px 10px;border:1px solid #ccc;border-radius:4px;background:#fff;font:inherit;font-size:12px;cursor:pointer;color:#444;white-space:nowrap}
+  #backfill-btn:hover:not(:disabled){background:#f0f0f7}
+  #backfill-btn:disabled{opacity:.5;cursor:wait}
+  #backfill-status{font-size:11px;color:#888;min-height:14px}
+  #filter-tabs{display:flex;gap:0;border-bottom:1px solid #e0e0e3;background:#f0f0f3}
+  .filter-tab{flex:1;padding:7px 4px;border:0;background:transparent;font:inherit;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:#888;cursor:pointer;border-bottom:2px solid transparent}
+  .filter-tab:hover{color:#333;background:#e8e8eb}
+  .filter-tab.active{color:#222;border-bottom-color:#222;background:#f5f5f7}
   #runs-list{flex:1;overflow-y:auto}
   .run-row{padding:10px 14px;border-bottom:1px solid #eee;cursor:pointer;display:flex;flex-direction:column;gap:4px}
   .run-row:hover{background:#eef}
@@ -154,8 +165,20 @@
 <body>
 <aside id="sidebar">
   <div id="sidebar-head">
-    <h2>Agent runs</h2>
-    <a id="nav-link" href="/chat">Chat →</a>
+    <div id="sidebar-head-top">
+      <h2>Agent runs</h2>
+      <a id="nav-link" href="/chat">Chat →</a>
+    </div>
+    <div id="backfill-row">
+      <input id="backfill-limit" type="number" min="1" max="100" value="20" title="Number of PRs">
+      <button id="backfill-btn" type="button">▶ Run last N open PRs</button>
+    </div>
+    <div id="backfill-status"></div>
+  </div>
+  <div id="filter-tabs">
+    <button class="filter-tab active" data-filter="all" type="button">All</button>
+    <button class="filter-tab" data-filter="ready" type="button">✓ Ready</button>
+    <button class="filter-tab" data-filter="blocked" type="button">✗ Blocked</button>
   </div>
   <div id="runs-list"><div class="empty">Loading…</div></div>
 </aside>
@@ -169,6 +192,13 @@ const detailEl = document.getElementById('detail');
 const emptyDetailEl = document.getElementById('empty-detail');
 let activeRunId = null;
 let runs = [];
+let activeFilter = 'all';
+
+function filteredRuns(){
+  if (activeFilter === 'ready') return runs.filter(r => (r.verdict || '').toUpperCase() === 'READY');
+  if (activeFilter === 'blocked') return runs.filter(r => (r.verdict || '').toUpperCase() !== 'READY');
+  return runs;
+}
 
 async function authFetch(url, opts){
   const r = await fetch(url, opts);
@@ -201,12 +231,15 @@ function dateGroupLabel(ts){
 
 function renderRunsList(){
   runsListEl.innerHTML = '';
-  if (!runs.length) {
-    runsListEl.innerHTML = '<div class="empty">No runs yet. They\'ll appear here as the agent reviews PRs.</div>';
+  const visible = filteredRuns();
+  if (!visible.length) {
+    runsListEl.innerHTML = runs.length
+      ? '<div class="empty">No ' + activeFilter + ' runs.</div>'
+      : '<div class="empty">No runs yet. They\'ll appear here as the agent reviews PRs.</div>';
     return;
   }
   let lastGroup = null;
-  for (const r of runs) {
+  for (const r of visible) {
     const group = dateGroupLabel(r.ts);
     if (group !== lastGroup) {
       const hdr = document.createElement('div');
@@ -824,5 +857,37 @@ async function refresh(){
     loadDetail(runs[0].run_id);
   }
 })();
+
+// --- Filter tabs --------------------------------------------------------------
+for (const tab of document.querySelectorAll('.filter-tab')) {
+  tab.addEventListener('click', () => {
+    activeFilter = tab.dataset.filter;
+    for (const t of document.querySelectorAll('.filter-tab')) t.classList.toggle('active', t.dataset.filter === activeFilter);
+    renderRunsList();
+  });
+}
+
+// --- Backfill button ----------------------------------------------------------
+document.getElementById('backfill-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('backfill-btn');
+  const statusEl = document.getElementById('backfill-status');
+  const limit = parseInt(document.getElementById('backfill-limit').value, 10) || 20;
+  btn.disabled = true;
+  statusEl.style.color = '#888';
+  statusEl.textContent = 'Queuing…';
+  try {
+    const r = await authFetch(`/api/v1/backfill?limit=${limit}&repo=BerriAI/litellm`, { method: 'POST' });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + await r.text());
+    const data = await r.json();
+    statusEl.style.color = '#0a5';
+    statusEl.textContent = `Queued ${data.queued} PRs. Runs will appear as they complete.`;
+    setTimeout(() => refresh(), 10000);
+  } catch (err) {
+    statusEl.style.color = '#c00';
+    statusEl.textContent = String(err);
+  } finally {
+    btn.disabled = false;
+  }
+});
 </script>
 </body></html>

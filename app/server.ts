@@ -149,6 +149,40 @@ async function fetchPr(
   }>;
 }
 
+async function getOrgInstallationId(org: string): Promise<number> {
+  const r = await fetch("https://api.github.com/app/installations?per_page=100", {
+    headers: {
+      Authorization: `Bearer ${makeAppJwt()}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!r.ok) throw new Error(`installations fetch failed: ${r.status}`);
+  const installs = await r.json() as Array<{ id: number; account: { login: string } }>;
+  const match = installs.find(i => i.account.login.toLowerCase() === org.toLowerCase());
+  if (!match) throw new Error(`no installation found for org: ${org}`);
+  return match.id;
+}
+
+async function listOpenPrs(token: string, repoFullName: string, limit: number): Promise<Array<{
+  number: number; html_url: string; draft: boolean; head: { sha: string };
+}>> {
+  const perPage = Math.min(limit, 100);
+  const r = await fetch(
+    `https://api.github.com/repos/${repoFullName}/pulls?state=open&per_page=${perPage}&sort=created&direction=desc`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    },
+  );
+  if (!r.ok) throw new Error(`PR list failed: ${r.status}`);
+  const prs = await r.json() as Array<{ number: number; html_url: string; draft: boolean; head: { sha: string } }>;
+  return prs.slice(0, limit);
+}
+
 // --- Express app --------------------------------------------------------------
 
 function verifyGithubSignature(
@@ -838,6 +872,51 @@ app.get("/api/models", requireLogin, (_req, res) => {
   } catch {
     res.json({ models: [] });
   }
+});
+
+// --- Backfill endpoint --------------------------------------------------------
+
+app.post("/api/v1/backfill", requireLogin, async (req, res) => {
+  const limit = Math.min(parseInt(String(req.query.limit ?? "20"), 10) || 20, 100);
+  const repo = String(req.query.repo ?? "BerriAI/litellm");
+  const org = repo.split("/")[0];
+
+  let installationId: number;
+  try {
+    installationId = await getOrgInstallationId(org);
+  } catch (err) {
+    res.status(500).json({ error: `could not find installation: ${err}` }); return;
+  }
+
+  let token: string;
+  try {
+    token = await getInstallationToken(installationId);
+  } catch (err) {
+    res.status(500).json({ error: `could not get token: ${err}` }); return;
+  }
+
+  let prs: Awaited<ReturnType<typeof listOpenPrs>>;
+  try {
+    prs = await listOpenPrs(token, repo, limit);
+  } catch (err) {
+    res.status(500).json({ error: `could not list PRs: ${err}` }); return;
+  }
+
+  const eligible = prs.filter(p => !p.draft);
+  res.json({ queued: eligible.length, total_fetched: prs.length, repo });
+
+  // Run sequentially to avoid hammering the LLM
+  (async () => {
+    for (const pr of eligible) {
+      try {
+        console.log(`[backfill] reviewing ${pr.html_url}`);
+        await reviewPr(pr.html_url, { source: "backfill" });
+      } catch (err) {
+        console.error(`[backfill] failed for ${pr.html_url}:`, err);
+      }
+    }
+    console.log(`[backfill] done — reviewed ${eligible.length} PRs`);
+  })().catch(console.error);
 });
 
 app.get("/healthz", (_req, res) => res.json({ ok: true }));

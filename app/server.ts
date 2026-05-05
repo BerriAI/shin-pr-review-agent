@@ -18,6 +18,8 @@ import {
   initRegistry,
   initSystemPrompts,
   reviewPr,
+  renderCard,
+  type TriageCard,
   promptChatSession,
   promptChatSessionStreaming,
   listThreads,
@@ -278,6 +280,7 @@ async function mergePrToAgentBranch(
   repoFullName: string,
   prNumber: number,
   agentBranch: string,
+  reviewCard?: string,
 ): Promise<{ merge_commit_sha: string; branch: string; staging_pr_url: string; staging_pr_number: number }> {
   const [pr, defaultBranch] = await Promise.all([
     fetchPr(token, repoFullName, prNumber),
@@ -315,12 +318,13 @@ async function mergePrToAgentBranch(
     "X-GitHub-Api-Version": "2022-11-28",
     "Content-Type": "application/json",
   };
+  const mergeComment = reviewCard
+    ? `🤖 **litellm-agent**: Merged into staging branch \`${agentBranch}\`. Staging PR: ${stagingPr.html_url}\n\n---\n\n${reviewCard}`
+    : `🤖 **litellm-agent**: Merged into staging branch \`${agentBranch}\`. Staging PR: ${stagingPr.html_url}`;
   await fetch(`https://api.github.com/repos/${repoFullName}/issues/${prNumber}/comments`, {
     method: "POST",
     headers: ghCloseHeaders,
-    body: JSON.stringify({
-      body: `🤖 **litellm-agent**: Merged into staging branch \`${agentBranch}\`. Staging PR: ${stagingPr.html_url}`,
-    }),
+    body: JSON.stringify({ body: mergeComment }),
   }).catch((err) => console.warn(`[merge] comment on PR #${prNumber} failed:`, err));
   await fetch(`https://api.github.com/repos/${repoFullName}/pulls/${prNumber}`, {
     method: "PATCH",
@@ -484,7 +488,7 @@ async function runWebhookReview(
   console.log(
     `[webhook] delivery=${delivery} triggering review for ${pr.html_url} sha=${pr.head.sha} source=${source}`,
   );
-  const { runId } = await reviewPr(pr.html_url, { source });
+  const { runId, card: reviewCard } = await reviewPr(pr.html_url, { source });
   console.log(
     `[webhook] delivery=${delivery} review complete for PR #${prNumber} sha=${pr.head.sha} elapsedMs=${Date.now() - t0}`,
   );
@@ -505,7 +509,7 @@ async function runWebhookReview(
         `[webhook] delivery=${delivery} PR #${prNumber} READY — auto-merging to staging (${countToday + 1}/${DAILY_MERGE_CAP} today)`,
       );
       try {
-        const mergeResult = await mergePrToAgentBranch(token, repoFullName, prNumber, agentBranchName());
+        const mergeResult = await mergePrToAgentBranch(token, repoFullName, prNumber, agentBranchName(), reviewCard);
         await db.updateStagingMergeResult(prNumber, repoFullName, {
           stagingPrUrl: mergeResult.staging_pr_url,
           stagingPrNumber: mergeResult.staging_pr_number,
@@ -2282,8 +2286,11 @@ async function pollBlockedWatches(): Promise<void> {
               await db.resetBlockedWatch(runId);
             } else {
               console.log(`[blocked-watch] PR #${prNumber} now READY — auto-merging to staging (${countToday + 1}/${DAILY_MERGE_CAP} today)`);
+              const watchReviewCard = finalRun?.card
+                ? renderCard(finalRun.card as unknown as TriageCard)
+                : undefined;
               try {
-                const mergeResult = await mergePrToAgentBranch(token, repoFullName, prNumber, agentBranchName());
+                const mergeResult = await mergePrToAgentBranch(token, repoFullName, prNumber, agentBranchName(), watchReviewCard);
                 await db.updateStagingMergeResult(prNumber, repoFullName, {
                   stagingPrUrl: mergeResult.staging_pr_url,
                   stagingPrNumber: mergeResult.staging_pr_number,

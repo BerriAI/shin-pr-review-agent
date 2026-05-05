@@ -974,7 +974,7 @@ async function _runKarpathyE2BSandbox(
 
 // --- Fuse logic (port of Python fuse()) ---------------------------------------
 
-interface TriageCard {
+export interface TriageCard {
   summary: string;
   size_line: string;
   failing_line: string;

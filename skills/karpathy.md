@@ -32,33 +32,54 @@ The PR URL is given to you directly. Use the `gh` CLI and your bash/read tools t
 
 ## Output
 
-Print your final JSON verdict as the LAST LINE of your reply (single-line JSON). Schema:
+### Zone 1 — Analysis (free-form)
+
+Write your findings in plain prose. No format constraints. Think through the diff here.
+
+### Zone 2 — Verdict (machine-parsed)
+
+After analysis, output your verdict as the **last line** of your reply. Rules:
+- Prefix the line with exactly `VERDICT: ` (uppercase, colon, space)
+- Single-line JSON only — no newlines inside the object
+- No code fences, no markdown formatting, no trailing text after the JSON
+
+Example last line:
+```
+VERDICT: {"decision": "merge", "blocking_reasons": [], "risk_signals": {...}}
+```
+
+Schema:
 
 ```json
 {
-  "linked_issue": null,
-  "fix_shapes": [],
-  "merge_gate": {
-    "safe_for_high_rps_gateway": "yes",
-    "one_liner": "",
-    "unintended_consequences": [],
-    "hot_path_notes": [],
-    "what_would_make_yes": ""
-  },
-  "findings": [
+  "decision": "merge | block | needs_human",
+  "blocking_reasons": [
     {
-      "regression_archetype": "",
-      "bug_class": "",
-      "fix_locus": "",
-      "sibling_loci": [],
-      "evidence": [],
-      "breadth": "narrow_correct",
-      "recommended_fix": ""
+      "category": "correctness | hot_path_regression | provider_blast_radius | breaking_change | scope_creep | missing_tests | security",
+      "file": "path/to/file.py",
+      "lines": "142-158",
+      "explanation": "one or two sentences grounded in the diff",
+      "evidence_snippet": "exact lines from the diff"
     }
-  ]
+  ],
+  "risk_signals": {
+    "touches_hot_path": true,
+    "hot_path_functions": ["litellm.completion"],
+    "modifies_shared_utils": true,
+    "providers_affected": ["bedrock"],
+    "cross_provider_risk": true,
+    "breaks_public_api": false,
+    "breaks_proxy_config": false,
+    "tests_added_for_change": "yes | partial | no",
+    "scope_matches_description": true
+  }
 }
 ```
 
-`breadth` must be one of: `narrow_correct`, `narrow_missed_class`, `scope_expansion`, `scope_drift`, `wrong_fix_layer`, `performance_regression_hot_path`, `dead_code_unreachable`, `production_behavior_mismatch`, `maintainability_risk`, `behavior_change_high_blast_radius`.
+Rules:
+- `decision`: `"merge"` — no blocking issues; `"block"` — must not merge; `"needs_human"` — ambiguous, requires human judgment
+- `blocking_reasons`: empty array `[]` when `decision` is `"merge"`. Each entry must cite exact file/lines from the diff.
+- `evidence_snippet`: copy exact lines from the diff — never paraphrase or invent.
+- `tests_added_for_change`: `"yes"` if tests cover the changed logic, `"partial"` if incomplete, `"no"` if none.
 
-Empty `findings: []` is correct when no issues found. Do not invent findings to appear thorough.
+Empty `blocking_reasons: []` is correct when no issues found. Do not invent findings to appear thorough.

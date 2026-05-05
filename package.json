@@ -19,6 +19,7 @@
     "@opentelemetry/resources": "^2.7.1",
     "@opentelemetry/sdk-node": "^0.216.0",
     "@opentelemetry/semantic-conventions": "^1.40.0",
+    "e2b": "^2.19.4",
     "express": "^4.21.2",
     "express-session": "^1.18.1",
     "pg": "^8.13.3",

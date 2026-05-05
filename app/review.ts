@@ -18,6 +18,7 @@ import {
   SemanticConventions,
 } from "@arizeai/openinference-semantic-conventions";
 import { z } from "zod";
+import { Sandbox } from "e2b";
 import * as db from "./db.js";
 
 const llmTracer = trace.getTracer("pi-pr-review-agent.llm");
@@ -30,6 +31,18 @@ const PATTERN_GATHER_SCRIPT = resolve(
   __dirname,
   "../scripts/gather_pattern_local.ts",
 );
+const PATTERN_GATHER_E2B_SCRIPT = resolve(
+  __dirname,
+  "../scripts/gather_pattern_e2b.ts",
+);
+
+// Use e2b sandbox for pattern gather when E2B_API_KEY is set; fall back to
+// local clone otherwise.
+function _activePatternGatherScript(): string {
+  return process.env.E2B_API_KEY
+    ? PATTERN_GATHER_E2B_SCRIPT
+    : PATTERN_GATHER_SCRIPT;
+}
 
 // --- Debug logger -------------------------------------------------------------
 // Prefix every line with [debug] + ms-since-process-start + tag, so every print
@@ -701,16 +714,19 @@ function extractLastJson(text: string): unknown | null {
   const lines = text.trim().split("\n").reverse();
   for (const line of lines) {
     const t = line.trim();
-    if (t.startsWith("{")) {
+    const j = t.startsWith("VERDICT:") ? t.slice(8).trim()
+             : t.startsWith("{") ? t
+             : null;
+    if (j) {
       try {
-        return JSON.parse(t);
+        return JSON.parse(j);
       } catch {
         /* continue */
       }
     }
   }
-  // Fallback: find any {...} block
-  const m = text.match(/\{[\s\S]*\}/);
+  // Fallback: find JSON anchored to the known "decision" key near end of text
+  const m = text.match(/\{"decision"\s*:\s*"(?:merge|block|needs_human)"[\s\S]*\}/);
   if (m) {
     try {
       return JSON.parse(m[0]);
@@ -806,17 +822,154 @@ async function newSession(
 export async function runKarpathyCheck(
   prUrl: string,
 ): Promise<KarpathyReview | null> {
+  if (process.env.E2B_API_KEY) {
+    try {
+      return await _runKarpathyE2B(prUrl);
+    } catch (e) {
+      dbg(`runKarpathyCheck: E2B path threw`, e);
+      return null;
+    }
+  }
   try {
     const session = await newSession(KARPATHY_SYSTEM);
     const { output } = await runPrompt(session, `Review this PR: ${prUrl}`);
     session.dispose?.();
     const raw = extractLastJson(output);
-    if (!raw) {
-      return null;
-    }
+    if (!raw) return null;
     return KarpathyReviewSchema.parse(raw);
   } catch {
     return null;
+  }
+}
+
+async function _runKarpathyE2B(prUrl: string): Promise<KarpathyReview | null> {
+  const prNum = prNumberFromUrl(prUrl);
+  if (!prNum) return null;
+
+  const e2bKey = process.env.E2B_API_KEY!;
+  const anthropicKey =
+    process.env.ANTHROPIC_API_KEY ?? process.env.LITELLM_API_KEY;
+  if (!anthropicKey) {
+    dbg(`_runKarpathyE2B[${prNum}]: no ANTHROPIC_API_KEY or LITELLM_API_KEY`);
+    return null;
+  }
+  const anthropicBase =
+    process.env.ANTHROPIC_BASE_URL ?? process.env.LITELLM_API_BASE;
+
+  const skillBody = KARPATHY_SYSTEM.replace(/^---[\s\S]*?---\n/, "").trim();
+  const prompt = `${skillBody}
+
+The repository is already cloned at /home/user/repo. Do NOT use \`gh\` CLI.
+Instead use git commands directly:
+  - Fetch the PR:  git fetch origin pull/${prNum}/head:pr/${prNum}
+  - Get the diff:  git diff origin/main...pr/${prNum}
+  - List files:    git diff --name-only origin/main...pr/${prNum}
+  - Read files:    use Read/Bash tools on /home/user/repo/<path>
+
+PR to review: ${prUrl}`;
+
+  const SANDBOX_MAX = 2;
+  let lastErr: Error | undefined;
+  for (let si = 0; si <= SANDBOX_MAX; si++) {
+    if (si > 0) {
+      const delay = 5_000 * Math.pow(2, si - 1);
+      dbg(
+        `_runKarpathyE2B[${prNum}]: timeout — sandbox retry ${si}/${SANDBOX_MAX} in ${delay / 1000}s`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+    try {
+      return await _runKarpathyE2BSandbox(
+        prNum,
+        e2bKey,
+        anthropicKey,
+        anthropicBase,
+        prompt,
+      );
+    } catch (err) {
+      const msg = (err as Error).message ?? "";
+      const isTimeout =
+        msg.includes("deadline_exceeded") ||
+        msg.includes("timed out") ||
+        msg.includes("timeoutMs");
+      if (!isTimeout || si >= SANDBOX_MAX) throw err;
+      lastErr = err as Error;
+    }
+  }
+  throw lastErr;
+}
+
+async function _runKarpathyE2BSandbox(
+  prNum: number,
+  e2bKey: string,
+  anthropicKey: string,
+  anthropicBase: string | undefined,
+  prompt: string,
+): Promise<KarpathyReview | null> {
+  const sandbox = await Sandbox.create("claude", {
+    apiKey: e2bKey,
+    envs: {
+      ANTHROPIC_API_KEY: anthropicKey,
+      ...(anthropicBase ? { ANTHROPIC_BASE_URL: anthropicBase } : {}),
+    },
+    timeoutMs: 600_000,
+  });
+  try {
+    const cloneResult = await sandbox.commands.run(
+      `git clone --depth=50 https://github.com/BerriAI/litellm.git /home/user/repo 2>&1`,
+      { timeoutMs: 120_000 },
+    );
+    if (cloneResult.exitCode !== 0) {
+      throw new Error(
+        `git clone failed (exit ${cloneResult.exitCode}): ${cloneResult.stdout.slice(0, 300)}`,
+      );
+    }
+
+    const fetchResult = await sandbox.commands.run(
+      `cd /home/user/repo && git fetch origin pull/${prNum}/head:pr/${prNum} 2>&1`,
+      { timeoutMs: 60_000 },
+    );
+    if (fetchResult.exitCode !== 0) {
+      dbg(
+        `_runKarpathyE2BSandbox[${prNum}]: fetch warning: ${fetchResult.stdout.slice(0, 200)}`,
+      );
+    }
+
+    await sandbox.files.write("/tmp/karpathy_prompt.txt", prompt);
+
+    const MAX_403 = 2;
+    let claudeResult: Awaited<ReturnType<typeof sandbox.commands.run>>;
+    let attempt = 0;
+    while (true) {
+      let capturedOutput = "";
+      claudeResult = await sandbox.commands.run(
+        `cd /home/user/repo && claude --dangerously-skip-permissions -p "$(cat /tmp/karpathy_prompt.txt)"`,
+        {
+          timeoutMs: 600_000,
+          onStdout: (data: string) => {
+            capturedOutput += data;
+          },
+          onStderr: (data: string) => {
+            capturedOutput += data;
+          },
+        },
+      );
+      const is403 =
+        claudeResult.exitCode !== 0 && capturedOutput.includes("403");
+      if (!is403 || attempt >= MAX_403) break;
+      attempt++;
+      dbg(`_runKarpathyE2BSandbox[${prNum}]: 403 — retry ${attempt}/${MAX_403}`);
+      await new Promise((r) => setTimeout(r, 2_000 * attempt));
+    }
+
+    dbg(
+      `_runKarpathyE2BSandbox[${prNum}]: claude exit ${claudeResult.exitCode}`,
+    );
+    const raw = extractLastJson(claudeResult.stdout);
+    if (!raw) return null;
+    return KarpathyReviewSchema.parse(raw);
+  } finally {
+    await sandbox.kill();
   }
 }
 
@@ -1336,7 +1489,12 @@ async function _patternSingleShot(
   prUrl: string,
   log: (m: string) => void,
 ): Promise<string> {
-  const gatherData = await _runGatherLocal(prUrl, log);
+  const gatherData = await _runGatherLocal(
+    prUrl,
+    log,
+    _activePatternGatherScript(),
+    "pattern",
+  );
   const userPrompt = _buildPatternPrompt(prUrl, gatherData);
   log(`pattern: single-shot LLM call, prompt=${userPrompt.length} chars`);
 

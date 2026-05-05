@@ -129,6 +129,7 @@ async function fetchPr(
   draft: boolean;
   state: string;
   head: { sha: string };
+  base: { ref: string };
 }> {
   const r = await fetch(
     `https://api.github.com/repos/${repoFullName}/pulls/${prNumber}`,
@@ -146,7 +147,156 @@ async function fetchPr(
     draft: boolean;
     state: string;
     head: { sha: string };
+    base: { ref: string };
   }>;
+}
+
+function agentBranchName(): string {
+  const now = new Date();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const yyyy = now.getFullYear();
+  return `litellm_agent_oss_staging_${mm}_${dd}_${yyyy}`;
+}
+
+async function ensureBranch(
+  token: string,
+  repoFullName: string,
+  branchName: string,
+  fromRef: string,
+): Promise<void> {
+  const ghHeaders = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  const checkR = await fetch(
+    `https://api.github.com/repos/${repoFullName}/git/refs/heads/${branchName}`,
+    { headers: ghHeaders },
+  );
+  if (checkR.status === 200) return;
+  if (checkR.status !== 404)
+    throw new Error(`branch check failed: ${checkR.status}`);
+  const refR = await fetch(
+    `https://api.github.com/repos/${repoFullName}/git/refs/heads/${fromRef}`,
+    { headers: ghHeaders },
+  );
+  if (!refR.ok) throw new Error(`ref fetch failed: ${refR.status}`);
+  const refData = (await refR.json()) as { object: { sha: string } };
+  const createR = await fetch(
+    `https://api.github.com/repos/${repoFullName}/git/refs`,
+    {
+      method: "POST",
+      headers: { ...ghHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ref: `refs/heads/${branchName}`,
+        sha: refData.object.sha,
+      }),
+    },
+  );
+  if (!createR.ok)
+    throw new Error(
+      `branch create failed: ${createR.status} ${await createR.text()}`,
+    );
+}
+
+async function getDefaultBranch(token: string, repoFullName: string): Promise<string> {
+  const r = await fetch(`https://api.github.com/repos/${repoFullName}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!r.ok) throw new Error(`repo fetch failed: ${r.status}`);
+  const data = (await r.json()) as { default_branch: string };
+  return data.default_branch;
+}
+
+async function ensureStagingPr(
+  token: string,
+  repoFullName: string,
+  stagingBranch: string,
+  baseBranch: string,
+): Promise<{ html_url: string; number: number; created: boolean }> {
+  const ghHeaders = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  const [owner] = repoFullName.split("/");
+  // Check for existing open PR from this staging branch
+  const searchR = await fetch(
+    `https://api.github.com/repos/${repoFullName}/pulls?state=open&head=${owner}:${stagingBranch}&base=${baseBranch}&per_page=1`,
+    { headers: ghHeaders },
+  );
+  if (searchR.ok) {
+    const existing = (await searchR.json()) as Array<{ html_url: string; number: number }>;
+    if (existing.length > 0)
+      return { html_url: existing[0].html_url, number: existing[0].number, created: false };
+  }
+  // Create new PR
+  const now = new Date();
+  const dateLabel = `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()}`;
+  const createR = await fetch(
+    `https://api.github.com/repos/${repoFullName}/pulls`,
+    {
+      method: "POST",
+      headers: { ...ghHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: `[litellm-agent] Staging → ${baseBranch} (${dateLabel})`,
+        head: stagingBranch,
+        base: baseBranch,
+        body: `Automated staging PR created by litellm-agent.\n\nThis branch collects PRs approved by the agent on ${dateLabel}.`,
+      }),
+    },
+  );
+  if (!createR.ok)
+    throw new Error(`staging PR create failed: ${createR.status} ${await createR.text()}`);
+  const created = (await createR.json()) as { html_url: string; number: number };
+  return { html_url: created.html_url, number: created.number, created: true };
+}
+
+async function mergePrToAgentBranch(
+  token: string,
+  repoFullName: string,
+  prNumber: number,
+  agentBranch: string,
+): Promise<{ merge_commit_sha: string; branch: string; staging_pr_url: string; staging_pr_number: number }> {
+  const [pr, defaultBranch] = await Promise.all([
+    fetchPr(token, repoFullName, prNumber),
+    getDefaultBranch(token, repoFullName),
+  ]);
+  await ensureBranch(token, repoFullName, agentBranch, pr.base.ref);
+  const mergeR = await fetch(
+    `https://api.github.com/repos/${repoFullName}/merges`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        base: agentBranch,
+        head: pr.head.sha,
+        commit_message: `Merge PR #${prNumber} into agent staging branch`,
+      }),
+    },
+  );
+  if (!mergeR.ok && mergeR.status !== 204)
+    throw new Error(`merge failed: ${mergeR.status} ${await mergeR.text()}`);
+  const merge_commit_sha = mergeR.status === 204
+    ? pr.head.sha
+    : ((await mergeR.json()) as { sha: string }).sha;
+  const stagingPr = await ensureStagingPr(token, repoFullName, agentBranch, defaultBranch);
+  return {
+    merge_commit_sha,
+    branch: agentBranch,
+    staging_pr_url: stagingPr.html_url,
+    staging_pr_number: stagingPr.number,
+  };
 }
 
 async function getOrgInstallationId(org: string): Promise<number> {
@@ -917,6 +1067,82 @@ app.post("/api/v1/backfill", requireLogin, async (req, res) => {
     }
     console.log(`[backfill] done — reviewed ${eligible.length} PRs`);
   })().catch(console.error);
+});
+
+// --- Staging PRs list ---------------------------------------------------------
+
+app.get("/api/v1/staging-prs", requireLogin, async (req, res) => {
+  const repo = (req.query.repo as string) || "BerriAI/litellm";
+  const org = repo.split("/")[0];
+  let token: string;
+  try {
+    const installationId = await getOrgInstallationId(org);
+    token = await getInstallationToken(installationId);
+  } catch (err) {
+    return res.status(500).json({ error: `auth failed: ${err}` });
+  }
+  const r = await fetch(
+    `https://api.github.com/repos/${repo}/pulls?state=open&per_page=100&sort=updated&direction=desc`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    },
+  );
+  if (!r.ok)
+    return res.status(500).json({ error: `PR list failed: ${r.status}` });
+  const prs = (await r.json()) as Array<{
+    number: number;
+    title: string;
+    html_url: string;
+    head: { ref: string };
+    base: { ref: string };
+    created_at: string;
+    updated_at: string;
+    user: { login: string };
+  }>;
+  res.json(
+    prs
+      .filter((p) => p.head.ref.startsWith("litellm_agent_oss_staging_"))
+      .map((p) => ({
+        number: p.number,
+        title: p.title,
+        html_url: p.html_url,
+        branch: p.head.ref,
+        base: p.base.ref,
+        created_at: p.created_at,
+        updated_at: p.updated_at,
+        author: p.user.login,
+      })),
+  );
+});
+
+// --- Merge PR to agent staging branch -----------------------------------------
+
+app.post("/api/v1/prs/:number/merge-to-agent-branch", requireLogin, async (req, res) => {
+  const prNumber = parseInt(req.params.number, 10);
+  const repo = req.query.repo as string;
+  if (!repo || isNaN(prNumber))
+    return res.status(400).json({ error: "repo query param and numeric PR number required" });
+
+  const org = repo.split("/")[0];
+  let token: string;
+  try {
+    const installationId = await getOrgInstallationId(org);
+    token = await getInstallationToken(installationId);
+  } catch (err) {
+    return res.status(500).json({ error: `auth failed: ${err}` });
+  }
+
+  const branch = agentBranchName();
+  try {
+    const result = await mergePrToAgentBranch(token, repo, prNumber, branch);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 app.get("/healthz", (_req, res) => res.json({ ok: true }));

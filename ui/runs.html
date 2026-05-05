@@ -70,6 +70,13 @@
   .copy-btn{margin-left:auto;padding:5px 12px;border:1px solid #ccc;border-radius:4px;background:#fff;font:inherit;font-size:12px;cursor:pointer;color:#444;white-space:nowrap}
   .copy-btn:hover{background:#f0f0f7}
   .copy-btn.copied{background:#d4f4dd;border-color:#0a5;color:#0a5}
+  .merge-btn{margin-left:6px;background:#fff8e6;border-color:#d4a600;color:#7a5c00}
+  .merge-btn:hover:not(:disabled){background:#fff3cc}
+  .merge-btn:disabled{opacity:.5;cursor:wait}
+  .merge-btn.merging{background:#fff3cc;border-color:#d4a600}
+  .merge-btn.merged{background:#d4f4dd;border-color:#0a5;color:#0a5}
+  .merge-btn.merge-error{background:#fde0e0;border-color:#c33;color:#c00}
+  .merge-branch-label{font-size:11px;color:#0a5;margin-left:6px}
   .json-section{background:#f6f6f9;border:1px solid #e0e0e3;border-radius:6px;margin-bottom:14px;overflow:hidden}
   .json-section summary{padding:10px 18px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#666;cursor:pointer;user-select:none;list-style:none;display:flex;align-items:center;gap:8px}
   .json-section summary:hover{background:#eee}
@@ -161,12 +168,28 @@
   .label-buttons .status{font-size:12px;color:#888}
   .err{color:#c00;font-size:12px;margin-top:6px}
   .ok{color:#0a5;font-size:12px;margin-top:6px}
+  #view-tabs{display:flex;border-bottom:1px solid #e0e0e3;background:#eaeaed}
+  .view-tab{flex:1;padding:7px 4px;border:0;background:transparent;font:inherit;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#888;cursor:pointer;border-bottom:2px solid transparent}
+  .view-tab:hover{color:#333;background:#e0e0e4}
+  .view-tab.active{color:#222;border-bottom-color:#222;background:#f5f5f7}
+  #staging-prs-list{flex:1;overflow-y:auto;display:none}
+  .staging-row{padding:10px 14px;border-bottom:1px solid #eee;display:flex;flex-direction:column;gap:3px;text-decoration:none;color:inherit}
+  .staging-row:hover{background:#eef}
+  .staging-row-top{display:flex;align-items:center;gap:6px}
+  .staging-pr-num{font-size:11px;font-weight:700;color:#555;flex-shrink:0}
+  .staging-pr-title{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .staging-pr-branch{font-size:10px;font-family:ui-monospace,Menlo,monospace;color:#0a5;background:#d4f4dd;padding:1px 5px;border-radius:3px;flex-shrink:0}
+  .staging-pr-meta{font-size:11px;color:#888}
+  .staging-pr-base{font-size:10px;color:#888}
+  #staging-refresh-btn{padding:4px 10px;border:1px solid #ccc;border-radius:4px;background:#fff;font:inherit;font-size:11px;cursor:pointer;color:#444;flex-shrink:0}
+  #staging-refresh-btn:hover{background:#f0f0f7}
+  #staging-status{font-size:11px;color:#888;min-height:14px}
 </style></head>
 <body>
 <aside id="sidebar">
   <div id="sidebar-head">
     <div id="sidebar-head-top">
-      <h2>Agent runs</h2>
+      <h2 id="sidebar-title">Agent runs</h2>
       <a id="nav-link" href="/chat">Chat →</a>
     </div>
     <div id="backfill-row">
@@ -174,6 +197,16 @@
       <button id="backfill-btn" type="button">▶ Run last N open PRs</button>
     </div>
     <div id="backfill-status"></div>
+    <div id="staging-controls" style="display:none;flex-direction:column;gap:4px">
+      <div style="display:flex;gap:6px;align-items:center">
+        <button id="staging-refresh-btn" type="button">↺ Refresh</button>
+        <span id="staging-status"></span>
+      </div>
+    </div>
+  </div>
+  <div id="view-tabs">
+    <button class="view-tab active" data-view="runs" type="button">Runs</button>
+    <button class="view-tab" data-view="staging-prs" type="button">Staging PRs</button>
   </div>
   <div id="filter-tabs">
     <button class="filter-tab active" data-filter="all" type="button">All</button>
@@ -181,6 +214,7 @@
     <button class="filter-tab" data-filter="blocked" type="button">✗ Blocked</button>
   </div>
   <div id="runs-list"><div class="empty">Loading…</div></div>
+  <div id="staging-prs-list"><div class="empty">Loading…</div></div>
 </aside>
 <main id="main">
   <div id="empty-detail">Select a run on the left.</div>
@@ -612,6 +646,8 @@ function renderDetail(rec){
         <span>${fmtTime(rec.ts)} · ${fmtDuration(rec.duration_s)} · ${fmtCost(rec.cost_usd)}${tokenLine}</span>
         <span>${escapeHtml(rec.model_name || '')}${logfireLink(rec)}</span>
         <button id="copy-dump-btn" class="copy-btn" type="button">Copy debug dump</button>
+        <button id="merge-btn" class="copy-btn merge-btn" type="button">Merge to staging ↗</button>
+        <span id="merge-branch-label" class="merge-branch-label"></span>
       </div>
     </div>
     <div class="detail-body">
@@ -686,6 +722,7 @@ function renderDetail(rec){
     </div>
   `;
   document.getElementById('copy-dump-btn').addEventListener('click', () => copyDebugDump(rec));
+  document.getElementById('merge-btn').addEventListener('click', () => mergePrToStagingBranch(rec.pr_number, rec.pr_url));
   document.getElementById('save-btn').addEventListener('click', () => saveLabel(rec.run_id));
   document.getElementById('graduate-btn').addEventListener('click', () => graduate(rec.run_id));
   for (const btn of document.querySelectorAll('.arm-tab')) {
@@ -775,6 +812,33 @@ function renderDrilldownText(rec){
   return lines.join('\n');
 }
 
+async function mergePrToStagingBranch(prNumber, prUrl){
+  const btn = document.getElementById('merge-btn');
+  const branchLabel = document.getElementById('merge-branch-label');
+  const match = prUrl.match(/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/);
+  if (!match) { alert('Could not parse repo from PR URL: ' + prUrl); return; }
+  const repo = match[1];
+  btn.disabled = true;
+  btn.textContent = 'Merging…';
+  btn.className = 'copy-btn merge-btn merging';
+  branchLabel.textContent = '';
+  try {
+    const r = await authFetch(`/api/v1/prs/${prNumber}/merge-to-agent-branch?repo=${encodeURIComponent(repo)}`, { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+    btn.textContent = 'Merged ✓';
+    btn.className = 'copy-btn merge-btn merged';
+    branchLabel.innerHTML = '→ <a href="' + data.staging_pr_url + '" target="_blank" style="color:#0a5">PR #' + data.staging_pr_number + ' ↗</a> (' + data.branch + ')';
+  } catch (err) {
+    btn.textContent = 'Merge failed ✗';
+    btn.className = 'copy-btn merge-btn merge-error';
+    branchLabel.textContent = String(err);
+    branchLabel.style.color = '#c00';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function loadDetail(runId){
   activeRunId = runId;
   history.replaceState(null, '', '/runs#' + runId);
@@ -857,6 +921,76 @@ async function refresh(){
     loadDetail(runs[0].run_id);
   }
 })();
+
+// --- View tabs (Runs / Staging PRs) ------------------------------------------
+
+let activeView = 'runs';
+
+function setView(view) {
+  activeView = view;
+  const isRuns = view === 'runs';
+  document.getElementById('filter-tabs').style.display = isRuns ? '' : 'none';
+  document.getElementById('backfill-row').style.display = isRuns ? '' : 'none';
+  document.getElementById('backfill-status').style.display = isRuns ? '' : 'none';
+  document.getElementById('staging-controls').style.display = isRuns ? 'none' : 'flex';
+  document.getElementById('runs-list').style.display = isRuns ? '' : 'none';
+  document.getElementById('staging-prs-list').style.display = isRuns ? 'none' : '';
+  document.getElementById('sidebar-title').textContent = isRuns ? 'Agent runs' : 'Staging PRs';
+  if (!isRuns) {
+    emptyDetailEl.style.display = 'flex';
+    detailEl.style.display = 'none';
+    activeRunId = null;
+    loadStagingPrs();
+  }
+  for (const t of document.querySelectorAll('.view-tab'))
+    t.classList.toggle('active', t.dataset.view === view);
+}
+
+for (const tab of document.querySelectorAll('.view-tab')) {
+  tab.addEventListener('click', () => setView(tab.dataset.view));
+}
+
+// --- Staging PRs -------------------------------------------------------------
+
+function fmtRelative(iso) {
+  const diff = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 60) return m + 'm ago';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h ago';
+  return Math.floor(h / 24) + 'd ago';
+}
+
+async function loadStagingPrs() {
+  const listEl = document.getElementById('staging-prs-list');
+  const statusEl = document.getElementById('staging-status');
+  statusEl.textContent = 'Loading…';
+  try {
+    const r = await authFetch('/api/v1/staging-prs?repo=BerriAI/litellm');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const prs = await r.json();
+    statusEl.textContent = prs.length + ' open';
+    if (!prs.length) {
+      listEl.innerHTML = '<div class="empty">No open staging PRs.</div>';
+      return;
+    }
+    listEl.innerHTML = prs.map(pr => `
+      <a class="staging-row" href="${escapeHtml(pr.html_url)}" target="_blank" rel="noopener">
+        <div class="staging-row-top">
+          <span class="staging-pr-num">#${pr.number}</span>
+          <span class="staging-pr-title">${escapeHtml(pr.title)}</span>
+          <span class="staging-pr-branch">${escapeHtml(pr.branch.replace('litellm_agent_oss_staging_', ''))}</span>
+        </div>
+        <div class="staging-pr-meta">${escapeHtml(pr.author)} · updated ${fmtRelative(pr.updated_at)} · → ${escapeHtml(pr.base)}</div>
+      </a>
+    `).join('');
+  } catch (err) {
+    statusEl.textContent = '';
+    listEl.innerHTML = '<div class="empty err">' + escapeHtml(String(err)) + '</div>';
+  }
+}
+
+document.getElementById('staging-refresh-btn').addEventListener('click', loadStagingPrs);
 
 // --- Filter tabs --------------------------------------------------------------
 for (const tab of document.querySelectorAll('.filter-tab')) {

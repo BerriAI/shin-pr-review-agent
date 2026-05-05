@@ -12,8 +12,16 @@ import {
   type AgentSession,
   type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
+import {
+  OpenInferenceSpanKind,
+  SemanticConventions,
+} from "@arizeai/openinference-semantic-conventions";
 import { z } from "zod";
 import * as db from "./db.js";
+
+const llmTracer = trace.getTracer("pi-pr-review-agent.llm");
+const CAPTURE_PROMPTS = process.env.OTEL_LOG_PROMPTS !== "false";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SKILLS_DIR = resolve(__dirname, "../skills");
@@ -22,6 +30,16 @@ const PATTERN_GATHER_SCRIPT = resolve(
   __dirname,
   "../scripts/gather_pattern_local.ts",
 );
+
+// --- Debug logger -------------------------------------------------------------
+// Prefix every line with [debug] + ms-since-process-start + tag, so every print
+// in this file can be grep'd / removed in one sweep once the hang is fixed.
+const _DBG_T0 = Date.now();
+function dbg(tag: string, ...rest: unknown[]): void {
+  const ms = Date.now() - _DBG_T0;
+  // eslint-disable-next-line no-console
+  console.log(`[debug +${ms}ms] ${tag}`, ...rest);
+}
 
 // --- Pi SDK shared infra (initialised once) -----------------------------------
 
@@ -138,6 +156,10 @@ export async function runPrompt(
   message: string,
   onStream?: (event: StreamEvent) => void,
 ): Promise<{ output: string; toolTrace: ToolTraceEntry[] }> {
+  const promptId = randomUUID().slice(0, 8);
+  dbg(
+    `runPrompt[${promptId}]: ENTER msgLen=${message.length} preview="${message.slice(0, 80)}"`,
+  );
   const trace: ToolTraceEntry[] = [];
   let assistantText = "";
   const pending = new Map<string, string>();
@@ -147,7 +169,9 @@ export async function runPrompt(
     release = res;
   });
 
+  let eventCount = 0;
   const unsubscribe = session.subscribe((event: any) => {
+    eventCount++;
     if (event.type === "message_update") {
       const m = event.assistantMessageEvent;
       if (m?.type === "text_delta" && typeof m.delta === "string") {
@@ -157,6 +181,9 @@ export async function runPrompt(
     } else if (event.type === "tool_execution_start") {
       const id = event.toolCallId ?? `${event.toolName}:${trace.length}`;
       pending.set(id, event.toolName);
+      dbg(
+        `runPrompt[${promptId}]: tool_execution_start tool=${event.toolName} id=${id}`,
+      );
       trace.push({
         kind: "call",
         tool: event.toolName,
@@ -174,6 +201,9 @@ export async function runPrompt(
       const raw = event.result ?? event.output ?? event.error ?? "";
       const s = typeof raw === "string" ? raw : JSON.stringify(raw);
       const preview = s.length > 240 ? s.slice(0, 240) + "…" : s;
+      dbg(
+        `runPrompt[${promptId}]: tool_execution_end tool=${name} isError=${!!event.isError}`,
+      );
       trace.push({
         kind: "result",
         tool: name,
@@ -189,21 +219,30 @@ export async function runPrompt(
     } else if (event.type === "tool_execution_update") {
       const raw = event.update;
       const text =
-        raw == null ? "" :
-        typeof raw === "string" ? raw :
-        JSON.stringify(raw);
+        raw == null ? "" : typeof raw === "string" ? raw : JSON.stringify(raw);
       if (text) onStream?.({ type: "progress", text });
     } else if (event.type === "agent_end" && !settled) {
+      dbg(`runPrompt[${promptId}]: agent_end received, releasing done promise`);
       settled = true;
       release();
+    } else {
+      dbg(`runPrompt[${promptId}]: event type=${event.type}`);
     }
   });
 
   try {
+    dbg(`runPrompt[${promptId}]: calling session.prompt()`);
     await session.prompt(message);
+    dbg(
+      `runPrompt[${promptId}]: session.prompt() resolved, awaiting agent_end (events so far=${eventCount}, pending tools=${pending.size})`,
+    );
     await done;
+    dbg(
+      `runPrompt[${promptId}]: done awaited; total events=${eventCount}, assistantTextLen=${assistantText.length}, traceLen=${trace.length}`,
+    );
   } finally {
     unsubscribe();
+    dbg(`runPrompt[${promptId}]: unsubscribed`);
   }
 
   if (!assistantText.trim()) {
@@ -673,13 +712,26 @@ const reviewPrTool = defineTool({
     _signal: any,
     onUpdate: any,
   ) => {
-    const progress = (msg: string) =>
+    dbg(
+      `review_pr.execute: ENTER pr_url=${params.pr_url} toolCallId=${_toolCallId}`,
+    );
+    const progress = (msg: string) => {
+      dbg(`review_pr.execute: progress -> ${msg}`);
       onUpdate?.({ type: "progress", text: msg });
-    const { card, drilldown } = await reviewPr(params.pr_url, {
-      onProgress: progress,
-    });
-    const text = drilldown ? `${card}\n\n${drilldown}` : card;
-    return { content: [{ type: "text" as const, text }] };
+    };
+    try {
+      const { card, drilldown } = await reviewPr(params.pr_url, {
+        onProgress: progress,
+      });
+      dbg(
+        `review_pr.execute: reviewPr resolved cardLen=${card.length} drilldownLen=${drilldown.length}`,
+      );
+      const text = drilldown ? `${card}\n\n${drilldown}` : card;
+      return { content: [{ type: "text" as const, text }] };
+    } catch (e) {
+      dbg(`review_pr.execute: THREW`, e);
+      throw e;
+    }
   },
 });
 
@@ -690,6 +742,9 @@ async function newSession(
   extraTools: ToolDefinition[] = [],
 ): Promise<AgentSession> {
   const model = defaultModel();
+  dbg(
+    `newSession: ENTER toolCount=${extraTools.length} model=${model ? ((model as any).id ?? "?") : "<none>"} systemPromptLen=${systemPrompt.length}`,
+  );
   const { session } = await createAgentSession({
     sessionManager: SessionManager.inMemory(),
     authStorage,
@@ -698,6 +753,7 @@ async function newSession(
     customTools: extraTools,
     systemPrompt,
   } as any);
+  dbg(`newSession: createAgentSession resolved`);
   return session;
 }
 
@@ -1135,7 +1191,10 @@ function prNumberFromUrl(url: string): number | null {
 }
 
 /** When the model returns prose instead of JSON, still drive fuse/drilldown; full text is appended under *Drill-down*. */
-function triageReportFromPlainOutput(prUrl: string, prose: string): TriageReport {
+function triageReportFromPlainOutput(
+  prUrl: string,
+  prose: string,
+): TriageReport {
   const trimmed = prose.trim();
   const summary =
     trimmed.length <= 600
@@ -1153,42 +1212,69 @@ function triageReportFromPlainOutput(prUrl: string, prose: string): TriageReport
 
 // --- Single-shot pattern review (local gather + one LLM call, no tool loop) ---
 
-const _MAX_PATCH  = 800;
-const _MAX_DOC    = 500;
-const _MAX_SIB    = 400;
+const _MAX_PATCH = 800;
+const _MAX_DOC = 500;
+const _MAX_SIB = 400;
 const _MAX_PROMPT = 12_000;
 
-function _runGatherLocal(prUrl: string, log: (m: string) => void): Promise<Record<string, unknown>> {
+function _runGatherLocal(
+  prUrl: string,
+  log: (m: string) => void,
+): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
+    const t0 = Date.now();
     log("pattern: running local gather");
-    const child = spawn("npx", ["tsx", PATTERN_GATHER_SCRIPT, prUrl], { env: { ...process.env } });
+    dbg(`_runGatherLocal: spawning npx tsx ${PATTERN_GATHER_SCRIPT} ${prUrl}`);
+    const child = spawn("npx", ["tsx", PATTERN_GATHER_SCRIPT, prUrl], {
+      env: { ...process.env },
+    });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+    child.stdout.on("data", (d: Buffer) => {
+      stdout += d.toString();
+    });
     child.stderr.on("data", (d: Buffer) => {
       const line = d.toString();
       stderr += line;
-      line.split("\n").filter(Boolean).forEach((l) => log(`gather: ${l.trim()}`));
+      line
+        .split("\n")
+        .filter(Boolean)
+        .forEach((l) => log(`gather: ${l.trim()}`));
     });
     child.on("close", (code: number) => {
-      if (code !== 0) reject(new Error(`gather exited ${code}: ${stderr.slice(0, 400)}`));
+      dbg(
+        `_runGatherLocal: child closed code=${code} elapsed=${Date.now() - t0}ms stdoutLen=${stdout.length} stderrLen=${stderr.length}`,
+      );
+      if (code !== 0)
+        reject(new Error(`gather exited ${code}: ${stderr.slice(0, 400)}`));
       else {
-        try { resolve(JSON.parse(stdout.trim())); }
-        catch { reject(new Error(`gather output not JSON: ${stdout.slice(0, 200)}`)); }
+        try {
+          resolve(JSON.parse(stdout.trim()));
+        } catch {
+          reject(new Error(`gather output not JSON: ${stdout.slice(0, 200)}`));
+        }
       }
+    });
+    child.on("error", (err) => {
+      dbg(`_runGatherLocal: child error event`, err);
+      reject(err);
     });
   });
 }
 
-function _buildPatternPrompt(prUrl: string, g: Record<string, unknown>): string {
-  const files  = (g.diff_files        as any[]) ?? [];
-  const docs   = (g.doc_excerpts      as any[]) ?? [];
-  const sibs   = (g.sibling_excerpts  as any[]) ?? [];
+function _buildPatternPrompt(
+  prUrl: string,
+  g: Record<string, unknown>,
+): string {
+  const files = (g.diff_files as any[]) ?? [];
+  const docs = (g.doc_excerpts as any[]) ?? [];
+  const sibs = (g.sibling_excerpts as any[]) ?? [];
   const parts: string[] = [`PR: ${prUrl}\n\n`, "## Diff\n\n"];
 
   for (const f of files) {
     let patch = (f.patch as string) ?? "";
-    if (patch.length > _MAX_PATCH) patch = patch.slice(0, _MAX_PATCH) + "\n... [patch truncated]";
+    if (patch.length > _MAX_PATCH)
+      patch = patch.slice(0, _MAX_PATCH) + "\n... [patch truncated]";
     parts.push(`### \`${f.filename}\`\n\`\`\`diff\n${patch}\n\`\`\`\n\n`);
   }
   if (docs.length) {
@@ -1196,51 +1282,156 @@ function _buildPatternPrompt(prUrl: string, g: Record<string, unknown>): string 
     for (const d of docs) {
       const exc = ((d.excerpt as string) ?? "").slice(0, _MAX_DOC);
       const matched = ((d.matched_files as string[]) ?? []).join(", ");
-      parts.push(`**\`${d.path}\`** (matched \`${matched}\`):\n\`\`\`\n${exc}\n\`\`\`\n\n`);
+      parts.push(
+        `**\`${d.path}\`** (matched \`${matched}\`):\n\`\`\`\n${exc}\n\`\`\`\n\n`,
+      );
     }
   }
   if (sibs.length) {
     parts.push("## Sibling file excerpts\n\n");
     for (const sg of sibs) {
       parts.push(`**For \`${sg.diff_file}\`:**\n`);
-      for (const s of (sg.siblings as any[])) {
+      for (const s of sg.siblings as any[]) {
         const head = ((s.head_excerpt as string) ?? "").slice(0, _MAX_SIB);
         parts.push(`\`${s.path}\`:\n\`\`\`\n${head}\n\`\`\`\n\n`);
       }
     }
   }
   let prompt = parts.join("");
-  if (prompt.length > _MAX_PROMPT) prompt = prompt.slice(0, _MAX_PROMPT) + "\n\n... [prompt truncated]";
+  if (prompt.length > _MAX_PROMPT)
+    prompt = prompt.slice(0, _MAX_PROMPT) + "\n\n... [prompt truncated]";
   return prompt;
 }
 
-async function _patternSingleShot(prUrl: string, log: (m: string) => void): Promise<string> {
+async function _patternSingleShot(
+  prUrl: string,
+  log: (m: string) => void,
+): Promise<string> {
   const gatherData = await _runGatherLocal(prUrl, log);
   const userPrompt = _buildPatternPrompt(prUrl, gatherData);
   log(`pattern: single-shot LLM call, prompt=${userPrompt.length} chars`);
 
-  const base  = _litellmBase  ?? process.env.LITELLM_API_BASE?.replace(/\/+$/, "");
-  const key   = _litellmKey   ?? process.env.LITELLM_API_KEY;
-  const model = defaultModelId ?? process.env.LITELLM_DEFAULT_MODEL ?? "anthropic/claude-sonnet-4-6";
+  const base =
+    _litellmBase ?? process.env.LITELLM_API_BASE?.replace(/\/+$/, "");
+  const key = _litellmKey ?? process.env.LITELLM_API_KEY;
+  const model =
+    defaultModelId ??
+    process.env.LITELLM_DEFAULT_MODEL ??
+    "anthropic/claude-sonnet-4-6";
 
-  const resp = await fetch(`${base}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({
-      model,
-      max_tokens: 4096,
-      messages: [
-        { role: "system", content: PATTERN_SYSTEM_SINGLE_SHOT },
-        { role: "user",   content: userPrompt },
-      ],
-    }),
+  // OpenInference LLM span around the raw LiteLLM fetch. This call bypasses
+  // the `pi-ai` SDK path (which is auto-instrumented via OpenInference's
+  // OpenAI/Anthropic packages), so we emit OpenInference attributes manually
+  // here so the span renders alongside the SDK-traced ones.
+  return llmTracer.startActiveSpan("chat litellm", async (span) => {
+    const messages = [
+      { role: "system", content: PATTERN_SYSTEM_SINGLE_SHOT },
+      { role: "user", content: userPrompt },
+    ];
+    const requestBody = { model, max_tokens: 4096, messages };
+
+    span.setAttributes({
+      [SemanticConventions.OPENINFERENCE_SPAN_KIND]: OpenInferenceSpanKind.LLM,
+      [SemanticConventions.LLM_SYSTEM]: "litellm",
+      [SemanticConventions.LLM_PROVIDER]: "litellm",
+      [SemanticConventions.LLM_MODEL_NAME]: model,
+      [SemanticConventions.LLM_INVOCATION_PARAMETERS]: JSON.stringify({
+        max_tokens: 4096,
+      }),
+      "pr.url": prUrl,
+      "pr.review.kind": "pattern_single_shot",
+    });
+    if (CAPTURE_PROMPTS) {
+      span.setAttribute(
+        SemanticConventions.INPUT_VALUE,
+        JSON.stringify(messages),
+      );
+      span.setAttribute(SemanticConventions.INPUT_MIME_TYPE, "application/json");
+      messages.forEach((m, i) => {
+        span.setAttribute(
+          `${SemanticConventions.LLM_INPUT_MESSAGES}.${i}.${SemanticConventions.MESSAGE_ROLE}`,
+          m.role,
+        );
+        span.setAttribute(
+          `${SemanticConventions.LLM_INPUT_MESSAGES}.${i}.${SemanticConventions.MESSAGE_CONTENT}`,
+          m.content,
+        );
+      });
+    }
+
+    try {
+      const resp = await fetch(`${base}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify(requestBody),
+      });
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(
+          `LLM call failed HTTP ${resp.status}: ${txt.slice(0, 300)}`,
+        );
+      }
+      const json = (await resp.json()) as {
+        id?: string;
+        model?: string;
+        choices: Array<{
+          message: { content: string };
+          finish_reason?: string;
+        }>;
+        usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          total_tokens?: number;
+        };
+      };
+      const content = json.choices[0]?.message?.content ?? "";
+
+      if (json.model) {
+        span.setAttribute(SemanticConventions.LLM_MODEL_NAME, json.model);
+      }
+      if (json.usage?.prompt_tokens != null) {
+        span.setAttribute(
+          SemanticConventions.LLM_TOKEN_COUNT_PROMPT,
+          json.usage.prompt_tokens,
+        );
+      }
+      if (json.usage?.completion_tokens != null) {
+        span.setAttribute(
+          SemanticConventions.LLM_TOKEN_COUNT_COMPLETION,
+          json.usage.completion_tokens,
+        );
+      }
+      if (json.usage?.total_tokens != null) {
+        span.setAttribute(
+          SemanticConventions.LLM_TOKEN_COUNT_TOTAL,
+          json.usage.total_tokens,
+        );
+      }
+      if (CAPTURE_PROMPTS) {
+        span.setAttribute(SemanticConventions.OUTPUT_VALUE, content);
+        span.setAttribute(SemanticConventions.OUTPUT_MIME_TYPE, "text/plain");
+        span.setAttribute(
+          `${SemanticConventions.LLM_OUTPUT_MESSAGES}.0.${SemanticConventions.MESSAGE_ROLE}`,
+          "assistant",
+        );
+        span.setAttribute(
+          `${SemanticConventions.LLM_OUTPUT_MESSAGES}.0.${SemanticConventions.MESSAGE_CONTENT}`,
+          content,
+        );
+      }
+      span.setStatus({ code: SpanStatusCode.OK });
+      return content;
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+      throw err;
+    } finally {
+      span.end();
+    }
   });
-  if (!resp.ok) {
-    const txt = await resp.text();
-    throw new Error(`LLM call failed HTTP ${resp.status}: ${txt.slice(0, 300)}`);
-  }
-  const json = (await resp.json()) as { choices: Array<{ message: { content: string } }> };
-  return json.choices[0]?.message?.content ?? "";
 }
 
 // --- Core review orchestration ------------------------------------------------
@@ -1262,7 +1453,9 @@ export async function reviewPr(
   const t0 = Date.now();
   const runId = randomUUID().replace(/-/g, "");
   const source = opts.source ?? "chat";
+  dbg(`reviewPr: ENTER prUrl=${prUrl} runId=${runId} source=${source}`);
   const log = (msg: string) => {
+    dbg(`reviewPr[${runId.slice(0, 6)}]: log -> ${msg}`);
     opts.onProgress?.(msg);
   };
 
@@ -1286,13 +1479,20 @@ export async function reviewPr(
   // Run triage only. Pattern review is disabled for the v0 deploy.
   await Promise.all([
     (async () => {
+      const triageT0 = Date.now();
       try {
         log("triage: creating session");
         const session = await newSession(TRIAGE_SYSTEM);
         log("triage: running gather + analysis");
+        dbg(
+          `reviewPr.triage: about to call runPrompt (session created in ${Date.now() - triageT0}ms)`,
+        );
         let { output: triageOut, toolTrace: tt } = await runPrompt(
           session,
           `Triage this PR: ${prUrl}`,
+        );
+        dbg(
+          `reviewPr.triage: runPrompt returned outputLen=${triageOut.length} traceLen=${tt.length} elapsed=${Date.now() - triageT0}ms`,
         );
         triageTrace = tt;
         const raw = extractLastJson(triageOut);
@@ -1307,6 +1507,7 @@ export async function reviewPr(
         }
       } catch (e) {
         triageErr = String(e);
+        dbg(`reviewPr.triage: ERROR after ${Date.now() - triageT0}ms`, e);
         log(`triage: ERROR — ${e}`);
       }
     })(),
@@ -1331,6 +1532,9 @@ export async function reviewPr(
     // })(),
   ]);
 
+  dbg(
+    `reviewPr: Promise.all settled, total elapsed=${Date.now() - t0}ms triageOk=${!!triage} patternOk=${!!pattern} triageErr="${triageErr}" patternErr="${patternErr}"`,
+  );
   const allTrace = [...triageTrace, ...patternTrace];
   const duration = (Date.now() - t0) / 1000;
 
@@ -1371,9 +1575,17 @@ export async function reviewPr(
   log(`provisional verdict: ${JSON.stringify(provisional)}`);
   if (provisional.verdict === "READY") {
     log("karpathy check: running");
-    karpathy = await runKarpathyCheck(prUrl).catch(() => null);
+    const kT0 = Date.now();
+    karpathy = await runKarpathyCheck(prUrl).catch((e) => {
+      dbg(`reviewPr: karpathy check threw`, e);
+      return null;
+    });
+    dbg(
+      `reviewPr: karpathy check returned in ${Date.now() - kT0}ms result=${karpathy ? "ok" : "null"}`,
+    );
   }
 
+  dbg(`reviewPr: building final card + drilldown`);
   const card = fuse(triage, pattern, karpathy);
   const cardText = renderCard(card);
   let drilldown = renderDrilldown(triage, pattern, karpathy);
@@ -1388,6 +1600,7 @@ export async function reviewPr(
 
   log(`card: ${JSON.stringify(card)}`);
 
+  dbg(`reviewPr: about to insertRun`);
   await db
     .insertRun({
       run_id: runId,
@@ -1407,8 +1620,11 @@ export async function reviewPr(
       messages: { triage: [], pattern: [] },
       karpathy_check: karpathy ?? {},
     })
-    .catch(() => {});
+    .catch((e) => {
+      dbg(`reviewPr: insertRun failed`, e);
+    });
 
+  dbg(`reviewPr: EXIT runId=${runId} totalElapsed=${Date.now() - t0}ms`);
   return { card: cardText, drilldown, runId, toolTrace: allTrace };
 }
 
@@ -1474,7 +1690,22 @@ async function runQueued<T>(thread: Thread, fn: () => Promise<T>): Promise<T> {
     resolve = res;
     reject = rej;
   });
-  thread.queue = thread.queue.then(() => fn().then(resolve, reject));
+  dbg(
+    `runQueued: chaining onto thread=${thread.id} queue (turns=${thread.turns.length})`,
+  );
+  thread.queue = thread.queue.then(() => {
+    dbg(`runQueued: queue head reached for thread=${thread.id}, invoking fn`);
+    return fn().then(
+      (v) => {
+        dbg(`runQueued: fn resolved for thread=${thread.id}`);
+        resolve(v);
+      },
+      (e) => {
+        dbg(`runQueued: fn rejected for thread=${thread.id}`, e);
+        reject(e);
+      },
+    );
+  });
   return result;
 }
 
@@ -1488,8 +1719,12 @@ export async function promptChatSession(
   threadId: string;
   availableTools: string[];
 }> {
+  dbg(`promptChatSession: ENTER threadId=${threadId} msgLen=${message.length}`);
   const thread = await ensureChatSession(threadId, title);
   const availableTools = getAvailableTools(thread);
+  dbg(
+    `promptChatSession: ensured session, availableTools=${JSON.stringify(availableTools)}`,
+  );
   return runQueued(thread, async () => {
     const { output, toolTrace } = await runPrompt(thread.agent!, message);
     thread.turns.push({ role: "user", content: message });
@@ -1499,6 +1734,9 @@ export async function promptChatSession(
       tool_trace: toolTrace,
     });
     thread.updated_at = Date.now() / 1000;
+    dbg(
+      `promptChatSession: EXIT threadId=${threadId} outputLen=${output.length} traceLen=${toolTrace.length}`,
+    );
     return { output, toolTrace, threadId, availableTools };
   });
 }
@@ -1514,8 +1752,14 @@ export async function promptChatSessionStreaming(
   threadId: string;
   availableTools: string[];
 }> {
+  dbg(
+    `promptChatSessionStreaming: ENTER threadId=${threadId} msgLen=${message.length}`,
+  );
   const thread = await ensureChatSession(threadId, title);
   const availableTools = getAvailableTools(thread);
+  dbg(
+    `promptChatSessionStreaming: ensured session, availableTools=${JSON.stringify(availableTools)}`,
+  );
   return runQueued(thread, async () => {
     const { output, toolTrace } = await runPrompt(
       thread.agent!,
@@ -1529,6 +1773,9 @@ export async function promptChatSessionStreaming(
       tool_trace: toolTrace,
     });
     thread.updated_at = Date.now() / 1000;
+    dbg(
+      `promptChatSessionStreaming: EXIT threadId=${threadId} outputLen=${output.length} traceLen=${toolTrace.length}`,
+    );
     return { output, toolTrace, threadId, availableTools };
   });
 }

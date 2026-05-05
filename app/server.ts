@@ -20,6 +20,14 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const UI_DIR = resolve(__dirname, "../ui");
 
+// --- Debug logger -------------------------------------------------------------
+const _DBG_T0 = Date.now();
+function dbg(tag: string, ...rest: unknown[]): void {
+  const ms = Date.now() - _DBG_T0;
+  // eslint-disable-next-line no-console
+  console.log(`[debug +${ms}ms] ${tag}`, ...rest);
+}
+
 // --- Auth config --------------------------------------------------------------
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME;
@@ -141,12 +149,16 @@ app.post("/chat/api", requireLogin, async (req, res) => {
   if (!message?.trim()) return res.status(400).json({ error: "message is empty" });
 
   const tid = thread_id ?? randomUUID().replace(/-/g, "");
+  const t0 = Date.now();
+  dbg(`POST /chat/api: ENTER tid=${tid} msgLen=${message.length} preview="${message.slice(0, 80)}"`);
   try {
-    // Ensure thread exists (creates lazily)
     await ensureChatSession(tid, title);
+    dbg(`POST /chat/api: ensureChatSession done (${Date.now() - t0}ms), calling promptChatSession`);
     const { output, toolTrace, availableTools } = await promptChatSession(tid, message, title);
+    dbg(`POST /chat/api: promptChatSession resolved (${Date.now() - t0}ms total) outputLen=${output.length}`);
     res.json({ output, tool_trace: toolTrace, thread_id: tid, available_tools: availableTools });
   } catch (err) {
+    dbg(`POST /chat/api: THREW after ${Date.now() - t0}ms`, err);
     res.json({ output: `⚠️ agent failed: ${err}`, tool_trace: [], thread_id: tid });
   }
 });
@@ -160,6 +172,8 @@ app.post("/chat/stream", requireLogin, async (req, res) => {
   if (!message?.trim()) return res.status(400).json({ error: "message is empty" });
 
   const tid = thread_id ?? randomUUID().replace(/-/g, "");
+  const t0 = Date.now();
+  dbg(`POST /chat/stream: ENTER tid=${tid} msgLen=${message.length} preview="${message.slice(0, 80)}"`);
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -169,15 +183,19 @@ app.post("/chat/stream", requireLogin, async (req, res) => {
 
   try {
     await ensureChatSession(tid, title);
+    dbg(`POST /chat/stream: ensureChatSession done (${Date.now() - t0}ms), calling promptChatSessionStreaming`);
     const { output, toolTrace, availableTools } = await promptChatSessionStreaming(
       tid, message, title,
       (event) => send(event)
     );
+    dbg(`POST /chat/stream: promptChatSessionStreaming resolved (${Date.now() - t0}ms total)`);
     send({ type: "done", output, tool_trace: toolTrace, thread_id: tid, available_tools: availableTools });
   } catch (err) {
+    dbg(`POST /chat/stream: THREW after ${Date.now() - t0}ms`, err);
     send({ type: "error", message: String(err), thread_id: tid });
   } finally {
     res.end();
+    dbg(`POST /chat/stream: response ended tid=${tid}`);
   }
 });
 

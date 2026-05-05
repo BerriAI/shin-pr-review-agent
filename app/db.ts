@@ -271,6 +271,16 @@ export async function deleteEvalPr(setName: string, prId: number): Promise<boole
   return (rowCount ?? 0) > 0;
 }
 
+// Returns true if this (pr_number, head_sha, repo) is new — caller should proceed.
+// Returns false if already claimed — caller should skip.
+export async function claimWebhookReview(prNumber: number, headSha: string, repo: string): Promise<boolean> {
+  const { rowCount } = await pool().query(
+    `INSERT INTO webhook_reviewed (pr_number, head_sha, repo) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+    [prNumber, headSha, repo]
+  );
+  return (rowCount ?? 0) > 0;
+}
+
 export async function updateEvalPr(setName: string, prId: number, opts: {
   category?: string | null; notes?: string | null;
   humanLabel?: string | null; humanNotes?: string | null;

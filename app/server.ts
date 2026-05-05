@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual, createHmac } from "node:crypto";
+import { randomUUID, timingSafeEqual, createHmac, createSign } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -30,6 +30,8 @@ function dbg(tag: string, ...rest: unknown[]): void {
 
 // --- Auth config --------------------------------------------------------------
 
+const GITHUB_APP_ID = process.env.GITHUB_APP_ID ?? "";
+const GITHUB_APP_PRIVATE_KEY = process.env.GITHUB_APP_PRIVATE_KEY ?? "";
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "";
@@ -68,6 +70,44 @@ function requireLogin(req: Request, res: Response, next: NextFunction): void {
     res.redirect(303, "/login"); return;
   }
   res.status(401).json({ error: "login required" });
+}
+
+// --- GitHub App auth ----------------------------------------------------------
+
+function makeAppJwt(): string {
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ iat: now - 60, exp: now + 540, iss: GITHUB_APP_ID })).toString("base64url");
+  const data = `${header}.${payload}`;
+  const sig = createSign("RSA-SHA256").update(data).sign(GITHUB_APP_PRIVATE_KEY, "base64url");
+  return `${data}.${sig}`;
+}
+
+async function getInstallationToken(installationId: number): Promise<string> {
+  const r = await fetch(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${makeAppJwt()}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!r.ok) throw new Error(`installation token failed: ${r.status} ${await r.text()}`);
+  return ((await r.json()) as { token: string }).token;
+}
+
+async function fetchPr(token: string, repoFullName: string, prNumber: number): Promise<{
+  html_url: string; draft: boolean; state: string; head: { sha: string };
+}> {
+  const r = await fetch(`https://api.github.com/repos/${repoFullName}/pulls/${prNumber}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!r.ok) throw new Error(`PR fetch failed: ${r.status}`);
+  return r.json() as Promise<{ html_url: string; draft: boolean; state: string; head: { sha: string } }>;
 }
 
 // --- Express app --------------------------------------------------------------
@@ -113,31 +153,56 @@ app.post("/webhook/github", (req, res) => {
     }
   }
 
-  if (event !== "pull_request") {
+  if (event !== "issue_comment") {
     res.json({ skipped: true, reason: `event=${event}` }); return;
   }
 
   const payload = req.body as {
     action?: string;
-    pull_request?: { html_url?: string; draft?: boolean; number?: number };
+    comment?: { user?: { login?: string } };
+    issue?: { number?: number; pull_request?: unknown; state?: string };
+    repository?: { full_name?: string };
+    installation?: { id?: number };
   };
-  const action = payload.action ?? "";
-  const pr = payload.pull_request;
 
-  if (!["opened", "synchronize", "reopened"].includes(action)) {
+  const action = payload.action ?? "";
+  if (!["created", "edited"].includes(action)) {
     res.json({ skipped: true, reason: `action=${action}` }); return;
   }
-  if (!pr?.html_url) {
-    res.status(400).json({ error: "missing pull_request.html_url" }); return;
+  if (payload.comment?.user?.login !== "greptile-apps[bot]") {
+    res.json({ skipped: true, reason: "not greptile" }); return;
   }
-  if (pr.draft) {
-    res.json({ skipped: true, reason: "draft PR" }); return;
+  if (!payload.issue?.pull_request) {
+    res.json({ skipped: true, reason: "not a PR comment" }); return;
+  }
+  if (payload.issue.state !== "open") {
+    res.json({ skipped: true, reason: "PR not open" }); return;
   }
 
-  res.status(202).json({ ok: true, pr_url: pr.html_url });
+  const prNumber = payload.issue.number;
+  const repoFullName = payload.repository?.full_name;
+  const installationId = payload.installation?.id;
 
-  reviewPr(pr.html_url, { source: "webhook" }).catch((err) => {
-    console.error(`[webhook] reviewPr failed for ${pr.html_url}:`, err);
+  if (!prNumber || !repoFullName || !installationId) {
+    res.status(400).json({ error: "missing prNumber, repoFullName, or installationId" }); return;
+  }
+
+  res.status(202).json({ ok: true, queued: true });
+
+  (async () => {
+    const token = await getInstallationToken(installationId);
+    const pr = await fetchPr(token, repoFullName, prNumber);
+
+    if (pr.state !== "open") { console.log(`[webhook] PR #${prNumber} no longer open, skipping`); return; }
+    if (pr.draft) { console.log(`[webhook] PR #${prNumber} is draft, skipping`); return; }
+
+    const claimed = await db.claimWebhookReview(prNumber, pr.head.sha, repoFullName);
+    if (!claimed) { console.log(`[webhook] PR #${prNumber} sha=${pr.head.sha} already reviewed, skipping`); return; }
+
+    console.log(`[webhook] triggering review for ${pr.html_url} sha=${pr.head.sha}`);
+    await reviewPr(pr.html_url, { source: "webhook" });
+  })().catch((err) => {
+    console.error(`[webhook] failed for PR #${prNumber}:`, err);
   });
 });
 

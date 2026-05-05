@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual, createHmac } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -32,6 +32,7 @@ function dbg(tag: string, ...rest: unknown[]): void {
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "";
 const BOT_API_KEYS = new Set(
   (process.env.BOT_API_KEYS ?? "").split(",").map((k) => k.trim()).filter(Boolean)
 );
@@ -71,8 +72,19 @@ function requireLogin(req: Request, res: Response, next: NextFunction): void {
 
 // --- Express app --------------------------------------------------------------
 
+function verifyGithubSignature(rawBody: Buffer, sigHeader: string, secret: string): boolean {
+  const expected = "sha256=" + createHmac("sha256", secret).update(rawBody).digest("hex");
+  const actual = Buffer.from(sigHeader, "utf8");
+  const exp = Buffer.from(expected, "utf8");
+  if (actual.length !== exp.length) return false;
+  return timingSafeEqual(actual, exp);
+}
+
 const app = express();
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({
+  limit: "10mb",
+  verify: (req: any, _res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.urlencoded({ extended: false }));
 
 if (SESSION_AUTH) {
@@ -84,6 +96,50 @@ if (SESSION_AUTH) {
     cookie: { sameSite: "lax", httpOnly: true },
   }));
 }
+
+// --- GitHub webhook -----------------------------------------------------------
+
+app.post("/webhook/github", (req, res) => {
+  const sigRaw = req.headers["x-hub-signature-256"];
+  const sig = Array.isArray(sigRaw) ? sigRaw[0] : sigRaw;
+  const eventRaw = req.headers["x-github-event"];
+  const event = Array.isArray(eventRaw) ? eventRaw[0] : eventRaw;
+
+  if (GITHUB_WEBHOOK_SECRET) {
+    if (!sig) { res.status(401).json({ error: "missing signature" }); return; }
+    const rawBody: Buffer = (req as any).rawBody;
+    if (!rawBody || !verifyGithubSignature(rawBody, sig, GITHUB_WEBHOOK_SECRET)) {
+      res.status(401).json({ error: "invalid signature" }); return;
+    }
+  }
+
+  if (event !== "pull_request") {
+    res.json({ skipped: true, reason: `event=${event}` }); return;
+  }
+
+  const payload = req.body as {
+    action?: string;
+    pull_request?: { html_url?: string; draft?: boolean; number?: number };
+  };
+  const action = payload.action ?? "";
+  const pr = payload.pull_request;
+
+  if (!["opened", "synchronize", "reopened"].includes(action)) {
+    res.json({ skipped: true, reason: `action=${action}` }); return;
+  }
+  if (!pr?.html_url) {
+    res.status(400).json({ error: "missing pull_request.html_url" }); return;
+  }
+  if (pr.draft) {
+    res.json({ skipped: true, reason: "draft PR" }); return;
+  }
+
+  res.status(202).json({ ok: true, pr_url: pr.html_url });
+
+  reviewPr(pr.html_url, { source: "webhook" }).catch((err) => {
+    console.error(`[webhook] reviewPr failed for ${pr.html_url}:`, err);
+  });
+});
 
 // --- UI routes ----------------------------------------------------------------
 

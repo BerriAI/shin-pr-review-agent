@@ -271,6 +271,42 @@ export async function deleteEvalPr(setName: string, prId: number): Promise<boole
   return (rowCount ?? 0) > 0;
 }
 
+export async function startBlockedWatch(runId: string): Promise<void> {
+  await pool().query(
+    `UPDATE runs SET blocked_watch_started_at = NOW() WHERE run_id = $1 AND blocked_watch_started_at IS NULL`,
+    [runId],
+  );
+}
+
+export async function resetBlockedWatch(runId: string): Promise<void> {
+  await pool().query(
+    `UPDATE runs SET blocked_watch_started_at = NOW() WHERE run_id = $1`,
+    [runId],
+  );
+}
+
+export async function listExpiredBlockedWatches(): Promise<Record<string, unknown>[]> {
+  const { rows } = await pool().query(`
+    SELECT run_id,
+           pr_url, pr_number,
+           EXTRACT(EPOCH FROM blocked_watch_started_at)::float8 AS blocked_watch_started_at_epoch,
+           blocked_watch_started_at
+    FROM runs
+    WHERE card->>'verdict' = 'BLOCKED'
+      AND blocked_watch_started_at IS NOT NULL
+      AND blocked_watch_started_at < NOW() - INTERVAL '7 days'
+  `);
+  return rows;
+}
+
+export async function deleteRun(runId: string): Promise<boolean> {
+  const { rowCount } = await pool().query(
+    `DELETE FROM runs WHERE run_id = $1`,
+    [runId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
 // Returns true if this (pr_number, head_sha, repo) is new — caller should proceed.
 // Returns false if already claimed — caller should skip.
 export async function claimWebhookReview(prNumber: number, headSha: string, repo: string): Promise<boolean> {

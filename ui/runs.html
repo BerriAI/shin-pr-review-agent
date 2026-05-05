@@ -207,6 +207,7 @@
   <div id="view-tabs">
     <button class="view-tab active" data-view="runs" type="button">Runs</button>
     <button class="view-tab" data-view="staging-prs" type="button">Staging PRs</button>
+    <button class="view-tab" data-view="agent" type="button">Agent</button>
   </div>
   <div id="filter-tabs">
     <button class="filter-tab active" data-filter="all" type="button">All</button>
@@ -215,6 +216,7 @@
   </div>
   <div id="runs-list"><div class="empty">Loading…</div></div>
   <div id="staging-prs-list"><div class="empty">Loading…</div></div>
+  <div id="agent-panel" style="display:none;flex:1;overflow-y:auto"><div class="empty">Loading…</div></div>
 </aside>
 <main id="main">
   <div id="empty-detail">Select a run on the left.</div>
@@ -929,21 +931,161 @@ let activeView = 'runs';
 function setView(view) {
   activeView = view;
   const isRuns = view === 'runs';
+  const isAgent = view === 'agent';
+  const isStagingPrs = view === 'staging-prs';
   document.getElementById('filter-tabs').style.display = isRuns ? '' : 'none';
   document.getElementById('backfill-row').style.display = isRuns ? '' : 'none';
   document.getElementById('backfill-status').style.display = isRuns ? '' : 'none';
-  document.getElementById('staging-controls').style.display = isRuns ? 'none' : 'flex';
+  document.getElementById('staging-controls').style.display = isStagingPrs ? 'flex' : 'none';
   document.getElementById('runs-list').style.display = isRuns ? '' : 'none';
-  document.getElementById('staging-prs-list').style.display = isRuns ? 'none' : 'block';
-  document.getElementById('sidebar-title').textContent = isRuns ? 'Agent runs' : 'Staging PRs';
+  document.getElementById('staging-prs-list').style.display = isStagingPrs ? 'block' : 'none';
+  document.getElementById('agent-panel').style.display = isAgent ? 'block' : 'none';
+  document.getElementById('sidebar-title').textContent = isRuns ? 'Agent runs' : isStagingPrs ? 'Staging PRs' : 'Agent';
   if (!isRuns) {
     emptyDetailEl.style.display = 'flex';
     detailEl.style.display = 'none';
     activeRunId = null;
-    loadStagingPrs();
+    if (isStagingPrs) loadStagingPrs();
+    if (isAgent) loadAgentInfo();
+    else { agentInfoData = null; activeAgentItem = null; }
   }
   for (const t of document.querySelectorAll('.view-tab'))
     t.classList.toggle('active', t.dataset.view === view);
+}
+
+let agentInfoData = null;
+let activeAgentItem = null;
+
+function renderAgentPanel(data) {
+  agentInfoData = data;
+  activeAgentItem = null;
+  const panel = document.getElementById('agent-panel');
+  const tools = data.tools || [];
+  const skills = data.skills || [];
+  let html = '';
+
+  html += '<div class="date-group">MCP Tools</div>';
+  if (!tools.length) {
+    html += '<div class="empty">No tools found — check LITELLM_API_BASE.</div>';
+  } else {
+    for (let i = 0; i < tools.length; i++) {
+      const t = tools[i];
+      html += `<div class="run-row" data-agent-type="tool" data-agent-idx="${i}">` +
+        `<div class="run-top">` +
+        `<span style="width:8px;height:8px;border-radius:50%;background:#5b8;flex-shrink:0;display:inline-block"></span>` +
+        `<span class="run-title" style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px">${escapeHtml(t.name)}</span>` +
+        `</div>` +
+        `<div class="run-liner">${escapeHtml(t.description)}</div>` +
+        `</div>`;
+    }
+  }
+
+  html += '<div class="date-group">Skills</div>';
+  if (!skills.length) {
+    html += '<div class="empty">No skills found.</div>';
+  } else {
+    for (let i = 0; i < skills.length; i++) {
+      const s = skills[i];
+      const firstSentence = s.description.split(/\.\s/)[0] + (s.description.includes('. ') ? '.' : '');
+      html += `<div class="run-row" data-agent-type="skill" data-agent-idx="${i}">` +
+        `<div class="run-top">` +
+        `<span style="width:8px;height:8px;border-radius:50%;background:#88a;flex-shrink:0;display:inline-block"></span>` +
+        `<span class="run-title" style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px">${escapeHtml(s.title)}</span>` +
+        `</div>` +
+        `<div class="run-liner">${escapeHtml(firstSentence)}</div>` +
+        `</div>`;
+    }
+  }
+
+  panel.innerHTML = html;
+
+  for (const row of panel.querySelectorAll('.run-row[data-agent-type]')) {
+    row.addEventListener('click', () => {
+      const type = row.dataset.agentType;
+      const idx = parseInt(row.dataset.agentIdx, 10);
+      for (const r of panel.querySelectorAll('.run-row')) r.classList.remove('active');
+      row.classList.add('active');
+      activeAgentItem = { type, idx };
+      if (type === 'tool') renderAgentToolDetail(agentInfoData.tools[idx]);
+      else renderAgentSkillDetail(agentInfoData.skills[idx]);
+    });
+  }
+}
+
+function renderAgentToolDetail(tool) {
+  emptyDetailEl.style.display = 'none';
+  detailEl.style.display = 'block';
+  const schema = tool.inputSchema ? JSON.stringify(tool.inputSchema, null, 2) : '{}';
+  const props = tool.inputSchema?.properties || {};
+  const required = new Set(tool.inputSchema?.required || []);
+  const paramRows = Object.entries(props).map(([k, v]) => {
+    const req = required.has(k) ? '<span style="color:#c00;margin-left:4px">*</span>' : '';
+    const type = v.type || (v.enum ? 'enum' : '');
+    const desc = v.description || (v.enum ? v.enum.join(' | ') : '');
+    return `<tr>
+      <td style="padding:6px 10px;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:nowrap;vertical-align:top">${escapeHtml(k)}${req}</td>
+      <td style="padding:6px 10px;font-size:11px;color:#888;vertical-align:top">${escapeHtml(type)}</td>
+      <td style="padding:6px 10px;font-size:12px;color:#444;vertical-align:top">${escapeHtml(desc)}</td>
+    </tr>`;
+  }).join('');
+
+  detailEl.innerHTML = `
+    <div class="detail-header">
+      <div class="detail-head">
+        <h1 style="font-family:ui-monospace,Menlo,monospace;font-size:16px">${escapeHtml(tool.name)}</h1>
+        <span class="scope-tag scope-slack">MCP Tool</span>
+      </div>
+      <div class="detail-meta">${escapeHtml(tool.description)}</div>
+    </div>
+    <div class="detail-left" style="padding:20px 28px 40px">
+      ${paramRows ? `<div class="section">
+        <h3>Parameters</h3>
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr style="border-bottom:1px solid #e0e0e3">
+            <th style="padding:4px 10px;text-align:left;font-size:11px;color:#888;font-weight:600;text-transform:uppercase">Name</th>
+            <th style="padding:4px 10px;text-align:left;font-size:11px;color:#888;font-weight:600;text-transform:uppercase">Type</th>
+            <th style="padding:4px 10px;text-align:left;font-size:11px;color:#888;font-weight:600;text-transform:uppercase">Description</th>
+          </tr></thead>
+          <tbody>${paramRows}</tbody>
+        </table>
+      </div>` : ''}
+      <details class="json-section">
+        <summary>Input schema (full JSON)</summary>
+        <div class="json-body"><pre>${escapeHtml(schema)}</pre></div>
+      </details>
+    </div>
+  `;
+}
+
+function renderAgentSkillDetail(skill) {
+  emptyDetailEl.style.display = 'none';
+  detailEl.style.display = 'block';
+  detailEl.innerHTML = `
+    <div class="detail-header">
+      <div class="detail-head">
+        <h1 style="font-family:ui-monospace,Menlo,monospace;font-size:16px">${escapeHtml(skill.title)}</h1>
+        <span class="scope-tag scope-eval">Skill</span>
+      </div>
+    </div>
+    <div class="detail-left" style="padding:20px 28px 40px">
+      <div class="section">
+        <h3>Description</h3>
+        <div class="card-text">${escapeHtml(skill.description)}</div>
+      </div>
+    </div>
+  `;
+}
+
+async function loadAgentInfo() {
+  const panel = document.getElementById('agent-panel');
+  panel.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const r = await authFetch('/api/agent-info');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    renderAgentPanel(await r.json());
+  } catch (err) {
+    panel.innerHTML = '<div class="empty err">' + escapeHtml(String(err)) + '</div>';
+  }
 }
 
 for (const tab of document.querySelectorAll('.view-tab')) {

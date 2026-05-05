@@ -4,6 +4,7 @@ import {
   createHmac,
   createSign,
 } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import express, {
@@ -28,6 +29,19 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const UI_DIR = resolve(__dirname, "../ui");
+const SKILLS_DIR = resolve(__dirname, "../skills");
+
+function parseSkillFrontmatter(content: string): Record<string, string> {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match) return {};
+  const fm: Record<string, string> = {};
+  for (const line of match[1].split("\n")) {
+    const colon = line.indexOf(":");
+    if (colon < 0) continue;
+    fm[line.slice(0, colon).trim()] = line.slice(colon + 1).trim();
+  }
+  return fm;
+}
 
 // --- Debug logger -------------------------------------------------------------
 const _DBG_T0 = Date.now();
@@ -128,6 +142,7 @@ async function fetchPr(
   html_url: string;
   draft: boolean;
   state: string;
+  updated_at: string;
   head: { sha: string; ref: string };
   base: { ref: string };
 }> {
@@ -146,6 +161,7 @@ async function fetchPr(
     html_url: string;
     draft: boolean;
     state: string;
+    updated_at: string;
     head: { sha: string; ref: string };
     base: { ref: string };
   }>;
@@ -561,7 +577,12 @@ app.post("/webhook/github", (req, res) => {
     console.log(
       `[webhook] delivery=${delivery} review complete for PR #${prNumber} sha=${pr.head.sha} elapsedMs=${Date.now() - t0}`,
     );
-    await stabilizePr(installationId, repoFullName, prNumber, pr.html_url, pr.head.ref, pr.head.sha, runId);
+    const finalRunId = await stabilizePr(installationId, repoFullName, prNumber, pr.html_url, pr.head.ref, pr.head.sha, runId);
+    const finalRun = await db.getRun(finalRunId);
+    if ((finalRun?.card as Record<string, unknown> | null)?.verdict === "BLOCKED") {
+      await db.startBlockedWatch(finalRunId);
+      console.log(`[webhook] delivery=${delivery} PR #${prNumber} BLOCKED — started 7-day inactivity watch`);
+    }
   })().catch((err) => {
     console.error(
       `[webhook] delivery=${delivery} failed for PR #${prNumber}:`,
@@ -1186,7 +1207,7 @@ async function stabilizePr(
   headSha: string,
   initialRunId: string,
   maxLoops = 3,
-): Promise<void> {
+): Promise<string> {
   let currentRunId = initialRunId;
   let currentSha = headSha;
 
@@ -1197,7 +1218,7 @@ async function stabilizePr(
 
     if (!unrelated.length) {
       console.log(`[stabilize] PR #${prNumber} loop=${loop} no unrelated failures — done`);
-      return;
+      return currentRunId;
     }
 
     console.log(`[stabilize] PR #${prNumber} loop=${loop} unrelated=${unrelated.join(", ")}`);
@@ -1206,7 +1227,7 @@ async function stabilizePr(
     const token = await getInstallationToken(installationId).catch(() => null);
     if (!token) {
       console.warn(`[stabilize] could not get token, aborting`);
-      return;
+      return currentRunId;
     }
 
     // Push empty commit to re-trigger all PR checks via contents:write.
@@ -1231,6 +1252,7 @@ async function stabilizePr(
   }
 
   console.log(`[stabilize] PR #${prNumber} reached max loops (${maxLoops})`);
+  return currentRunId;
 }
 
 // --- Staging PRs list ---------------------------------------------------------
@@ -1307,6 +1329,59 @@ app.post("/api/v1/prs/:number/merge-to-agent-branch", requireLogin, async (req, 
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
+});
+
+app.get("/api/agent-info", requireLogin, async (_req, res) => {
+  let skills: { name: string; title: string; description: string }[] = [];
+  try {
+    const files = readdirSync(SKILLS_DIR).filter((f) => f.endsWith(".md"));
+    skills = files.map((f) => {
+      const content = readFileSync(resolve(SKILLS_DIR, f), "utf8");
+      const fm = parseSkillFrontmatter(content);
+      const name = fm["name"] || f.replace(".md", "");
+      return { name, title: name, description: fm["description"] || "" };
+    });
+  } catch {
+    /* skills dir missing or unreadable */
+  }
+
+  let tools: { name: string; description: string; inputSchema: unknown }[] = [];
+  const base = process.env.LITELLM_API_BASE?.replace(/\/+$/, "");
+  const key = process.env.LITELLM_API_KEY;
+  if (base && key) {
+    try {
+      const r = await fetch(`${base}/mcp/`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`,
+          Accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+      });
+      if (r.ok) {
+        const text = await r.text();
+        // Response is SSE: "event: message\ndata: {...}\n\n"
+        const dataLine = text.split("\n").find((l) => l.startsWith("data:"));
+        const data = dataLine
+          ? (JSON.parse(dataLine.slice(5).trim()) as {
+              result?: { tools?: unknown[] };
+              tools?: unknown[];
+            })
+          : {};
+        const list = data?.result?.tools ?? data?.tools ?? [];
+        tools = (list as { name?: string; description?: string; inputSchema?: unknown }[]).map((t) => ({
+          name: t.name ?? "",
+          description: t.description ?? "",
+          inputSchema: t.inputSchema ?? {},
+        }));
+      }
+    } catch {
+      /* proxy unreachable */
+    }
+  }
+
+  res.json({ tools, skills });
 });
 
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
@@ -2006,6 +2081,75 @@ app.get("/api-docs", (_req, res) => {
 </html>`);
 });
 
+// --- Blocked-watch poll -------------------------------------------------------
+
+async function pollBlockedWatches(): Promise<void> {
+  const expired = await db.listExpiredBlockedWatches();
+  if (!expired.length) return;
+  console.log(`[blocked-watch] checking ${expired.length} expired watches`);
+
+  for (const run of expired) {
+    const prUrl = run.pr_url as string;
+    const prNumber = run.pr_number as number;
+    const runId = run.run_id as string;
+    const watchStartedAt = run.blocked_watch_started_at as Date;
+
+    const match = prUrl.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
+    if (!match) {
+      console.warn(`[blocked-watch] cannot parse repo from ${prUrl}, skipping`);
+      continue;
+    }
+    const repoFullName = match[1];
+    const org = repoFullName.split("/")[0];
+
+    try {
+      const installationId = await getOrgInstallationId(org);
+      const token = await getInstallationToken(installationId);
+      const pr = await fetchPr(token, repoFullName, prNumber).catch(() => null);
+
+      if (!pr || pr.state !== "open") {
+        console.log(`[blocked-watch] PR #${prNumber} no longer open — deleting run ${runId}`);
+        await db.deleteRun(runId);
+        continue;
+      }
+
+      const prUpdatedAt = new Date(pr.updated_at);
+      if (prUpdatedAt > watchStartedAt) {
+        console.log(`[blocked-watch] PR #${prNumber} had activity after watch start (${pr.updated_at}) — resetting watch`);
+        await db.resetBlockedWatch(runId);
+        continue;
+      }
+
+      console.log(`[blocked-watch] PR #${prNumber} stale for 7 days — closing and deleting run ${runId}`);
+      await fetch(`https://api.github.com/repos/${repoFullName}/issues/${prNumber}/comments`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          body: "🤖 **litellm-agent**: This PR was marked BLOCKED 7 days ago with no subsequent activity. Closing automatically.",
+        }),
+      }).catch((err) => console.warn(`[blocked-watch] comment failed for PR #${prNumber}:`, err));
+      await fetch(`https://api.github.com/repos/${repoFullName}/pulls/${prNumber}`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ state: "closed" }),
+      }).catch((err) => console.warn(`[blocked-watch] close failed for PR #${prNumber}:`, err));
+      await db.deleteRun(runId);
+    } catch (err) {
+      console.error(`[blocked-watch] error processing PR #${prNumber} run=${runId}:`, err);
+    }
+  }
+}
+
 // --- Startup ------------------------------------------------------------------
 
 const PORT = Number(process.env.PORT) || 8081;
@@ -2013,6 +2157,11 @@ const PORT = Number(process.env.PORT) || 8081;
 await db.initDb();
 await initRegistry();
 initSystemPrompts();
+
+// Poll every 6 hours for BLOCKED PRs with no activity after 7 days.
+const BLOCKED_WATCH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+setInterval(() => { pollBlockedWatches().catch(console.error); }, BLOCKED_WATCH_INTERVAL_MS);
+pollBlockedWatches().catch(console.error);
 
 app.listen(PORT, () => {
   console.log(`listening on http://localhost:${PORT}`);

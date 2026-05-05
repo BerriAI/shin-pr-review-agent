@@ -408,7 +408,116 @@ if (SESSION_AUTH) {
   );
 }
 
+// --- Daily auto-merge cap -----------------------------------------------------
+
+const DAILY_MERGE_CAP = 10;
+
 // --- GitHub webhook -----------------------------------------------------------
+
+// In-memory signal: Greptile has commented for a given (repo, prNumber, sha).
+// Ephemeral — lost on restart. Worst case: check_suite arrives first after restart,
+// Greptile signal missing → skip. issue_comment will pick it up when Greptile (re-)comments.
+const greptileReadyShas = new Set<string>();
+
+function greptileKey(repo: string, prNumber: number, sha: string): string {
+  return `${repo}#${prNumber}#${sha}`;
+}
+
+async function areAllCheckSuitesComplete(
+  token: string,
+  repoFullName: string,
+  sha: string,
+): Promise<boolean> {
+  const r = await fetch(
+    `https://api.github.com/repos/${repoFullName}/commits/${sha}/check-suites?per_page=100`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    },
+  );
+  if (!r.ok) {
+    console.warn(`[webhook] areAllCheckSuitesComplete fetch failed: ${r.status}`);
+    return false;
+  }
+  const data = (await r.json()) as { check_suites: Array<{ status: string }> };
+  return data.check_suites.length > 0 && data.check_suites.every((s) => s.status === "completed");
+}
+
+// Shared post-claim review logic used by both issue_comment and check_suite handlers.
+async function runWebhookReview(
+  installationId: number,
+  repoFullName: string,
+  prNumber: number,
+  delivery: string | undefined,
+  source: string,
+): Promise<void> {
+  const t0 = Date.now();
+  const token = await getInstallationToken(installationId);
+  const pr = await fetchPr(token, repoFullName, prNumber);
+  console.log(
+    `[webhook] delivery=${delivery} fetched PR #${prNumber}: state=${pr.state} draft=${pr.draft} headSha=${pr.head.sha}`,
+  );
+
+  if (pr.state !== "open") {
+    console.log(`[webhook] delivery=${delivery} PR #${prNumber} no longer open, skipping`);
+    return;
+  }
+  if (pr.draft) {
+    console.log(`[webhook] delivery=${delivery} PR #${prNumber} is draft, skipping`);
+    return;
+  }
+
+  const claimed = await db.claimWebhookReview(prNumber, pr.head.sha, repoFullName);
+  console.log(
+    `[webhook] delivery=${delivery} claimWebhookReview PR #${prNumber} sha=${pr.head.sha} claimed=${claimed}`,
+  );
+  if (!claimed) {
+    console.log(
+      `[webhook] delivery=${delivery} PR #${prNumber} sha=${pr.head.sha} already reviewed, skipping`,
+    );
+    return;
+  }
+
+  console.log(
+    `[webhook] delivery=${delivery} triggering review for ${pr.html_url} sha=${pr.head.sha} source=${source}`,
+  );
+  const { runId } = await reviewPr(pr.html_url, { source });
+  console.log(
+    `[webhook] delivery=${delivery} review complete for PR #${prNumber} sha=${pr.head.sha} elapsedMs=${Date.now() - t0}`,
+  );
+
+  const finalRun = await db.getRun(runId);
+  const finalVerdict = (finalRun?.card as Record<string, unknown> | null)?.verdict;
+  if (finalVerdict === "BLOCKED") {
+    await db.startBlockedWatch(runId);
+    console.log(`[webhook] delivery=${delivery} PR #${prNumber} BLOCKED — started 7-day inactivity watch`);
+  } else if (finalVerdict === "READY") {
+    const { claimed: stageClaimed, countToday } = await db.claimStagingMergeSlot(prNumber, repoFullName, DAILY_MERGE_CAP);
+    if (!stageClaimed) {
+      console.log(
+        `[webhook] delivery=${delivery} PR #${prNumber} READY but daily merge cap (${DAILY_MERGE_CAP}) reached (${countToday} today) — skipping auto-merge`,
+      );
+    } else {
+      console.log(
+        `[webhook] delivery=${delivery} PR #${prNumber} READY — auto-merging to staging (${countToday + 1}/${DAILY_MERGE_CAP} today)`,
+      );
+      try {
+        const mergeResult = await mergePrToAgentBranch(token, repoFullName, prNumber, agentBranchName());
+        await db.updateStagingMergeResult(prNumber, repoFullName, {
+          stagingPrUrl: mergeResult.staging_pr_url,
+          stagingPrNumber: mergeResult.staging_pr_number,
+          mergeCommitSha: mergeResult.merge_commit_sha,
+          runId,
+        });
+      } catch (err) {
+        console.error(`[webhook] delivery=${delivery} auto-stage PR #${prNumber} failed:`, err);
+      }
+    }
+  }
+}
 
 app.post("/webhook/github", (req, res) => {
   const sigRaw = req.headers["x-hub-signature-256"];
@@ -441,14 +550,73 @@ app.post("/webhook/github", (req, res) => {
     }
   }
 
-  if (event !== "issue_comment") {
+  if (event !== "issue_comment" && event !== "check_suite") {
     console.log(
-      `[webhook] delivery=${delivery} skipping: not an issue_comment (event=${event})`,
+      `[webhook] delivery=${delivery} skipping: event=${event} not handled`,
     );
     res.json({ skipped: true, reason: `event=${event}` });
     return;
   }
 
+  // --- check_suite completed: fire review if Greptile has already commented ---
+  if (event === "check_suite") {
+    const csPayload = req.body as {
+      action?: string;
+      check_suite?: {
+        head_sha?: string;
+        status?: string;
+        pull_requests?: Array<{ number?: number }>;
+      };
+      repository?: { full_name?: string };
+      installation?: { id?: number };
+    };
+
+    const csAction = csPayload.action ?? "";
+    const headSha = csPayload.check_suite?.head_sha ?? "";
+    const csPrs = csPayload.check_suite?.pull_requests ?? [];
+    const csRepo = csPayload.repository?.full_name ?? "";
+    const csInstallationId = csPayload.installation?.id;
+
+    console.log(
+      `[webhook] delivery=${delivery} check_suite action=${csAction} sha=${headSha} repo=${csRepo} prs=${csPrs.map((p) => p.number).join(",")}`,
+    );
+
+    if (csAction !== "completed" || !headSha || !csRepo || !csInstallationId) {
+      res.json({ skipped: true, reason: "check_suite not completed or missing fields" });
+      return;
+    }
+
+    const csInstallId: number = csInstallationId;
+
+    res.status(202).json({ ok: true, queued: true });
+
+    (async () => {
+      const token = await getInstallationToken(csInstallId);
+      const allDone = await areAllCheckSuitesComplete(token, csRepo, headSha);
+      if (!allDone) {
+        console.log(`[webhook] delivery=${delivery} check_suite: not all suites complete for sha=${headSha}, skipping`);
+        return;
+      }
+      for (const csPr of csPrs) {
+        const prNum = csPr.number;
+        if (!prNum) continue;
+        const key = greptileKey(csRepo, prNum, headSha);
+        if (!greptileReadyShas.has(key)) {
+          console.log(`[webhook] delivery=${delivery} check_suite: Greptile not yet ready for PR #${prNum} sha=${headSha}, skipping`);
+          continue;
+        }
+        console.log(`[webhook] delivery=${delivery} check_suite: both signals ready for PR #${prNum} sha=${headSha} — queueing review`);
+        await runWebhookReview(csInstallId, csRepo, prNum, delivery, "webhook_check_suite").catch((err) =>
+          console.error(`[webhook] delivery=${delivery} check_suite review failed for PR #${prNum}:`, err),
+        );
+      }
+    })().catch((err) =>
+      console.error(`[webhook] delivery=${delivery} check_suite handler failed:`, err),
+    );
+    return;
+  }
+
+  // --- issue_comment: record Greptile signal, fire review if CI already done ---
   const payload = req.body as {
     action?: string;
     comment?: {
@@ -524,65 +692,39 @@ app.post("/webhook/github", (req, res) => {
     return;
   }
 
+  const icPrNumber: number = prNumber;
+  const icRepo: string = repoFullName;
+  const icInstallId: number = installationId;
+
   const isEdit = action === "edited";
   console.log(
-    `[webhook] delivery=${delivery} accepted: PR #${prNumber} repo=${repoFullName} action=${action} isEdit=${isEdit} commentId=${commentId} -> queueing async review`,
+    `[webhook] delivery=${delivery} accepted: PR #${prNumber} repo=${repoFullName} action=${action} isEdit=${isEdit} commentId=${commentId} -> checking CI state`,
   );
 
   res.status(202).json({ ok: true, queued: true });
 
   (async () => {
-    const t0 = Date.now();
+    const token = await getInstallationToken(icInstallId);
+    const pr = await fetchPr(token, icRepo, icPrNumber);
     console.log(
-      `[webhook] delivery=${delivery} async start: PR #${prNumber} repo=${repoFullName}`,
-    );
-    const token = await getInstallationToken(installationId);
-    const pr = await fetchPr(token, repoFullName, prNumber);
-    console.log(
-      `[webhook] delivery=${delivery} fetched PR #${prNumber}: state=${pr.state} draft=${pr.draft} headSha=${pr.head.sha}`,
+      `[webhook] delivery=${delivery} fetched PR #${icPrNumber}: state=${pr.state} draft=${pr.draft} headSha=${pr.head.sha}`,
     );
 
-    if (pr.state !== "open") {
-      console.log(
-        `[webhook] delivery=${delivery} PR #${prNumber} no longer open (state=${pr.state}), skipping`,
-      );
-      return;
-    }
-    if (pr.draft) {
-      console.log(
-        `[webhook] delivery=${delivery} PR #${prNumber} is draft, skipping`,
-      );
-      return;
-    }
+    // Record that Greptile has commented for this SHA (checked by check_suite handler).
+    greptileReadyShas.add(greptileKey(icRepo, icPrNumber, pr.head.sha));
 
-    const claimed = await db.claimWebhookReview(
-      prNumber,
-      pr.head.sha,
-      repoFullName,
-    );
-    console.log(
-      `[webhook] delivery=${delivery} claimWebhookReview PR #${prNumber} sha=${pr.head.sha} claimed=${claimed}`,
-    );
-    if (!claimed) {
+    const allDone = await areAllCheckSuitesComplete(token, icRepo, pr.head.sha);
+    if (!allDone) {
       console.log(
-        `[webhook] delivery=${delivery} PR #${prNumber} sha=${pr.head.sha} already reviewed, skipping (action=${action} commentId=${commentId})`,
+        `[webhook] delivery=${delivery} PR #${icPrNumber} sha=${pr.head.sha}: CI not yet complete — check_suite handler will trigger review`,
       );
       return;
     }
 
     console.log(
-      `[webhook] delivery=${delivery} triggering review for ${pr.html_url} sha=${pr.head.sha} (action=${action} commentId=${commentId})`,
+      `[webhook] delivery=${delivery} PR #${icPrNumber} sha=${pr.head.sha}: both signals ready (Greptile + CI) — queueing review`,
     );
-    const { runId } = await reviewPr(pr.html_url, { source: "webhook" });
-    console.log(
-      `[webhook] delivery=${delivery} review complete for PR #${prNumber} sha=${pr.head.sha} elapsedMs=${Date.now() - t0}`,
-    );
-    const finalRunId = await stabilizePr(installationId, repoFullName, prNumber, pr.html_url, pr.head.ref, pr.head.sha, runId);
-    const finalRun = await db.getRun(finalRunId);
-    if ((finalRun?.card as Record<string, unknown> | null)?.verdict === "BLOCKED") {
-      await db.startBlockedWatch(finalRunId);
-      console.log(`[webhook] delivery=${delivery} PR #${prNumber} BLOCKED — started 7-day inactivity watch`);
-    }
+    await runWebhookReview(icInstallId, icRepo, icPrNumber, delivery, "webhook");
   })().catch((err) => {
     console.error(
       `[webhook] delivery=${delivery} failed for PR #${prNumber}:`,
@@ -1303,6 +1445,17 @@ app.get("/api/v1/staging-prs", requireLogin, async (req, res) => {
         author: p.user.login,
       })),
   );
+});
+
+// --- Auto-merged PRs list -----------------------------------------------------
+
+app.get("/api/v1/auto-merges", requireLogin, async (req, res) => {
+  const limit = Math.min(parseInt(String(req.query.limit ?? "100"), 10) || 100, 500);
+  try {
+    res.json(await db.listStagingMerges(limit));
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 // --- Merge PR to agent staging branch -----------------------------------------
@@ -2115,8 +2268,42 @@ async function pollBlockedWatches(): Promise<void> {
 
       const prUpdatedAt = new Date(pr.updated_at);
       if (prUpdatedAt > watchStartedAt) {
-        console.log(`[blocked-watch] PR #${prNumber} had activity after watch start (${pr.updated_at}) — resetting watch`);
-        await db.resetBlockedWatch(runId);
+        console.log(`[blocked-watch] PR #${prNumber} had activity after watch start (${pr.updated_at}) — re-reviewing`);
+        try {
+          const { runId: newRunId } = await reviewPr(prUrl, { source: "blocked_watch" });
+          const finalRunId = await stabilizePr(installationId, repoFullName, prNumber, prUrl, pr.head.ref, pr.head.sha, newRunId);
+          const finalRun = await db.getRun(finalRunId);
+          const newVerdict = (finalRun?.card as Record<string, unknown> | null)?.verdict;
+
+          if (newVerdict === "READY") {
+            const { claimed, countToday } = await db.claimStagingMergeSlot(prNumber, repoFullName, DAILY_MERGE_CAP);
+            if (!claimed) {
+              console.log(`[blocked-watch] PR #${prNumber} now READY but daily merge cap (${DAILY_MERGE_CAP}) reached (${countToday} today) — resetting watch`);
+              await db.resetBlockedWatch(runId);
+            } else {
+              console.log(`[blocked-watch] PR #${prNumber} now READY — auto-merging to staging (${countToday + 1}/${DAILY_MERGE_CAP} today)`);
+              try {
+                const mergeResult = await mergePrToAgentBranch(token, repoFullName, prNumber, agentBranchName());
+                await db.updateStagingMergeResult(prNumber, repoFullName, {
+                  stagingPrUrl: mergeResult.staging_pr_url,
+                  stagingPrNumber: mergeResult.staging_pr_number,
+                  mergeCommitSha: mergeResult.merge_commit_sha,
+                  runId: finalRunId,
+                });
+                await db.deleteRun(runId);
+              } catch (mergeErr) {
+                console.error(`[blocked-watch] auto-stage PR #${prNumber} failed:`, mergeErr);
+                await db.resetBlockedWatch(runId);
+              }
+            }
+          } else {
+            console.log(`[blocked-watch] PR #${prNumber} re-reviewed: verdict=${newVerdict} — resetting watch`);
+            await db.resetBlockedWatch(runId);
+          }
+        } catch (reviewErr) {
+          console.error(`[blocked-watch] re-review failed for PR #${prNumber}:`, reviewErr);
+          await db.resetBlockedWatch(runId);
+        }
         continue;
       }
 

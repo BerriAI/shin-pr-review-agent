@@ -25,10 +25,10 @@ The PR URL is given to you directly. Use the `gh` CLI and your bash/read tools t
 
 - Only cite files/symbols you actually read. Never invent.
 - If a file is truncated, say so in the finding rather than guessing.
-- `merge_gate.safe_for_high_rps_gateway`:
-  - `"yes"` — no production risk found
-  - `"conditional"` — risk exists but can ship with a specific fix
-  - `"no"` — must block; would cause production incidents at scale
+- VERDICT `decision` (must match what you put in the JSON):
+  - `"merge"` — no blocking issues for production at scale
+  - `"needs_human"` — ambiguous or judgment-heavy; cannot ship on model verdict alone
+  - `"block"` — must not merge; production or correctness risk you can cite from the diff
 
 ## Output
 

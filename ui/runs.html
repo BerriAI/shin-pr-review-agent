@@ -184,6 +184,10 @@
   #staging-refresh-btn{padding:4px 10px;border:1px solid #ccc;border-radius:4px;background:#fff;font:inherit;font-size:11px;cursor:pointer;color:#444;flex-shrink:0}
   #staging-refresh-btn:hover{background:#f0f0f7}
   #staging-status{font-size:11px;color:#888;min-height:14px}
+  #auto-merged-list{flex:1;overflow-y:auto;display:none}
+  .auto-merged-row{padding:10px 14px;border-bottom:1px solid #eee;display:flex;flex-direction:column;gap:3px}
+  .auto-merged-row:hover{background:#eef}
+  .auto-merged-badge{font-size:10px;padding:1px 5px;border-radius:3px;background:#d4f4dd;color:#0a5;font-weight:600;flex-shrink:0}
 </style></head>
 <body>
 <aside id="sidebar">
@@ -207,6 +211,7 @@
   <div id="view-tabs">
     <button class="view-tab active" data-view="runs" type="button">Runs</button>
     <button class="view-tab" data-view="staging-prs" type="button">Staging PRs</button>
+    <button class="view-tab" data-view="auto-merged" type="button">Auto-merged</button>
     <button class="view-tab" data-view="agent" type="button">Agent</button>
   </div>
   <div id="filter-tabs">
@@ -216,6 +221,7 @@
   </div>
   <div id="runs-list"><div class="empty">Loading…</div></div>
   <div id="staging-prs-list"><div class="empty">Loading…</div></div>
+  <div id="auto-merged-list"><div class="empty">Loading…</div></div>
   <div id="agent-panel" style="display:none;flex:1;overflow-y:auto"><div class="empty">Loading…</div></div>
 </aside>
 <main id="main">
@@ -933,19 +939,22 @@ function setView(view) {
   const isRuns = view === 'runs';
   const isAgent = view === 'agent';
   const isStagingPrs = view === 'staging-prs';
+  const isAutoMerged = view === 'auto-merged';
   document.getElementById('filter-tabs').style.display = isRuns ? '' : 'none';
   document.getElementById('backfill-row').style.display = isRuns ? '' : 'none';
   document.getElementById('backfill-status').style.display = isRuns ? '' : 'none';
   document.getElementById('staging-controls').style.display = isStagingPrs ? 'flex' : 'none';
   document.getElementById('runs-list').style.display = isRuns ? '' : 'none';
   document.getElementById('staging-prs-list').style.display = isStagingPrs ? 'block' : 'none';
+  document.getElementById('auto-merged-list').style.display = isAutoMerged ? 'block' : 'none';
   document.getElementById('agent-panel').style.display = isAgent ? 'block' : 'none';
-  document.getElementById('sidebar-title').textContent = isRuns ? 'Agent runs' : isStagingPrs ? 'Staging PRs' : 'Agent';
+  document.getElementById('sidebar-title').textContent = isRuns ? 'Agent runs' : isStagingPrs ? 'Staging PRs' : isAutoMerged ? 'Auto-merged PRs' : 'Agent';
   if (!isRuns) {
     emptyDetailEl.style.display = 'flex';
     detailEl.style.display = 'none';
     activeRunId = null;
     if (isStagingPrs) loadStagingPrs();
+    if (isAutoMerged) loadAutoMerges();
     if (isAgent) loadAgentInfo();
     else { agentInfoData = null; activeAgentItem = null; }
   }
@@ -1133,6 +1142,51 @@ async function loadStagingPrs() {
 }
 
 document.getElementById('staging-refresh-btn').addEventListener('click', loadStagingPrs);
+
+// --- Auto-merged PRs ---------------------------------------------------------
+
+async function loadAutoMerges() {
+  const listEl = document.getElementById('auto-merged-list');
+  listEl.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const r = await authFetch('/api/v1/auto-merges?limit=200');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const merges = await r.json();
+    if (!merges.length) {
+      listEl.innerHTML = '<div class="empty">No auto-merged PRs yet.</div>';
+      return;
+    }
+    let lastGroup = null;
+    let html = '';
+    for (const m of merges) {
+      const d = new Date(m.merged_at_epoch * 1000);
+      const group = dateGroupLabel(m.merged_at_epoch);
+      if (group !== lastGroup) {
+        html += `<div class="date-group">${escapeHtml(group)}</div>`;
+        lastGroup = group;
+      }
+      const prUrl = `https://github.com/${escapeHtml(m.repo)}/pull/${m.pr_number}`;
+      const title = m.pr_title && !m.pr_title.startsWith('http')
+        ? escapeHtml(m.pr_title)
+        : '#' + m.pr_number;
+      const time = d.toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+      const stagingLink = m.staging_pr_url
+        ? `<a href="${escapeHtml(m.staging_pr_url)}" target="_blank" rel="noopener" style="color:#0a5">Staging PR #${m.staging_pr_number} ↗</a>`
+        : '—';
+      html += `<div class="auto-merged-row">
+        <div class="staging-row-top">
+          <span class="staging-pr-num">#${m.pr_number}</span>
+          <a href="${prUrl}" target="_blank" rel="noopener" class="staging-pr-title" style="color:#06c;text-decoration:none">${title}</a>
+          <span class="auto-merged-badge">merged</span>
+        </div>
+        <div class="staging-pr-meta">${m.pr_author ? escapeHtml(m.pr_author) + ' · ' : ''}${time} · ${stagingLink}</div>
+      </div>`;
+    }
+    listEl.innerHTML = html;
+  } catch (err) {
+    listEl.innerHTML = '<div class="empty err">' + escapeHtml(String(err)) + '</div>';
+  }
+}
 
 // --- Filter tabs --------------------------------------------------------------
 for (const tab of document.querySelectorAll('.filter-tab')) {

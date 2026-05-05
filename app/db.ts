@@ -317,6 +317,68 @@ export async function claimWebhookReview(prNumber: number, headSha: string, repo
   return (rowCount ?? 0) > 0;
 }
 
+// --- Staging merge helpers ---
+
+// Atomically claims a daily merge slot for prNumber/repo.
+// Uses a single CTE so the count check and INSERT are one round-trip with no TOCTOU gap.
+// Returns { claimed: true, countToday } if slot was taken (countToday = count before this insert).
+// Returns { claimed: false, countToday } if cap already reached or PR already staged.
+export async function claimStagingMergeSlot(
+  prNumber: number,
+  repo: string,
+  cap: number,
+): Promise<{ claimed: boolean; countToday: number }> {
+  const { rows } = await pool().query(
+    `WITH daily AS (
+       SELECT COUNT(*)::int AS cnt
+       FROM staging_merges
+       WHERE repo = $2
+         AND merged_at >= (CURRENT_DATE AT TIME ZONE 'UTC')
+         AND merged_at <  (CURRENT_DATE AT TIME ZONE 'UTC' + INTERVAL '1 day')
+     ),
+     ins AS (
+       INSERT INTO staging_merges (pr_number, repo)
+       SELECT $1, $2 WHERE (SELECT cnt FROM daily) < $3
+       ON CONFLICT (pr_number, repo) DO NOTHING
+       RETURNING id
+     )
+     SELECT (SELECT cnt FROM daily) AS count_today,
+            (SELECT id FROM ins)    AS inserted_id`,
+    [prNumber, repo, cap],
+  );
+  const row = rows[0];
+  return { claimed: row.inserted_id != null, countToday: row.count_today as number };
+}
+
+export async function listStagingMerges(limit = 100): Promise<Record<string, unknown>[]> {
+  const { rows } = await pool().query(
+    `SELECT sm.id, sm.pr_number, sm.repo, sm.run_id,
+            sm.staging_pr_url, sm.staging_pr_number, sm.merge_commit_sha,
+            EXTRACT(EPOCH FROM sm.merged_at)::float8 AS merged_at_epoch,
+            r.pr_title, r.pr_author
+     FROM staging_merges sm
+     LEFT JOIN runs r ON sm.run_id = r.run_id
+     ORDER BY sm.merged_at DESC
+     LIMIT $1`,
+    [limit],
+  );
+  return rows;
+}
+
+// Fill in merge results after the GitHub merge API call succeeds.
+export async function updateStagingMergeResult(
+  prNumber: number,
+  repo: string,
+  result: { stagingPrUrl: string; stagingPrNumber: number; mergeCommitSha: string; runId: string },
+): Promise<void> {
+  await pool().query(
+    `UPDATE staging_merges
+     SET staging_pr_url = $3, staging_pr_number = $4, merge_commit_sha = $5, run_id = $6
+     WHERE pr_number = $1 AND repo = $2`,
+    [prNumber, repo, result.stagingPrUrl, result.stagingPrNumber, result.mergeCommitSha, result.runId],
+  );
+}
+
 export async function updateEvalPr(setName: string, prId: number, opts: {
   category?: string | null; notes?: string | null;
   humanLabel?: string | null; humanNotes?: string | null;

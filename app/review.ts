@@ -669,42 +669,41 @@ export const PatternReportSchema = z.object({
 });
 export type PatternReport = z.infer<typeof PatternReportSchema>;
 
-const KarpathyFindingSchema = z.object({
-  regression_archetype: z.string().default(""),
-  bug_class: z.string().default(""),
-  fix_locus: z.string().default(""),
-  sibling_loci: z.array(z.string()).default([]),
-  evidence: z.array(z.string()).default([]),
-  breadth: z.enum([
-    "narrow_correct",
-    "narrow_missed_class",
-    "scope_expansion",
-    "scope_drift",
-    "wrong_fix_layer",
-    "performance_regression_hot_path",
-    "dead_code_unreachable",
-    "production_behavior_mismatch",
-    "maintainability_risk",
-    "behavior_change_high_blast_radius",
-  ]),
-  recommended_fix: z.string().default(""),
+/** Matches the VERDICT JSON schema in `skills/karpathy.md`. */
+const KarpathyBlockingReasonCategorySchema = z.enum([
+  "correctness",
+  "hot_path_regression",
+  "provider_blast_radius",
+  "breaking_change",
+  "scope_creep",
+  "missing_tests",
+  "security",
+]);
+
+const KarpathyBlockingReasonSchema = z.object({
+  category: KarpathyBlockingReasonCategorySchema,
+  file: z.string(),
+  lines: z.string(),
+  explanation: z.string(),
+  evidence_snippet: z.string(),
 });
 
-const KarpathyMergeGateSchema = z.object({
-  safe_for_high_rps_gateway: z
-    .enum(["yes", "no", "conditional"])
-    .default("yes"),
-  one_liner: z.string().default(""),
-  unintended_consequences: z.array(z.string()).default([]),
-  hot_path_notes: z.array(z.string()).default([]),
-  what_would_make_yes: z.string().default(""),
+const KarpathyRiskSignalsSchema = z.object({
+  touches_hot_path: z.boolean().default(false),
+  hot_path_functions: z.array(z.string()).default([]),
+  modifies_shared_utils: z.boolean().default(false),
+  providers_affected: z.array(z.string()).default([]),
+  cross_provider_risk: z.boolean().default(false),
+  breaks_public_api: z.boolean().default(false),
+  breaks_proxy_config: z.boolean().default(false),
+  tests_added_for_change: z.enum(["yes", "partial", "no"]).default("no"),
+  scope_matches_description: z.boolean().default(true),
 });
 
 export const KarpathyReviewSchema = z.object({
-  linked_issue: z.string().nullable().default(null),
-  fix_shapes: z.array(z.string()).default([]),
-  merge_gate: KarpathyMergeGateSchema.default({}),
-  findings: z.array(KarpathyFindingSchema).default([]),
+  decision: z.enum(["merge", "block", "needs_human"]),
+  blocking_reasons: z.array(KarpathyBlockingReasonSchema).default([]),
+  risk_signals: KarpathyRiskSignalsSchema.default({}),
 });
 export type KarpathyReview = z.infer<typeof KarpathyReviewSchema>;
 
@@ -1018,12 +1017,18 @@ function isWideLowDensityFanout(t: TriageReport): boolean {
 
 function karpathyPenalty(k: KarpathyReview | null): [number, string | null] {
   if (!k) return [0, null];
-  const gate = k.merge_gate.safe_for_high_rps_gateway;
-  const weights: Record<string, number> = { no: 5, conditional: 2 };
-  const w = weights[gate] ?? 0;
+  const weights: Record<KarpathyReview["decision"], number> = {
+    merge: 0,
+    block: 5,
+    needs_human: 2,
+  };
+  const w = weights[k.decision] ?? 0;
   if (!w) return [0, null];
-  const liner = (k.merge_gate.one_liner ?? "").trim().replace(/\.$/, "");
-  const label = liner ? `karpathy ${gate} — ${liner}` : `karpathy ${gate}`;
+  const br0 = k.blocking_reasons[0];
+  const liner = (br0?.explanation ?? "").trim().replace(/\.$/, "");
+  const label = liner
+    ? `karpathy ${k.decision} — ${liner}`
+    : `karpathy ${k.decision}`;
   return [w, label];
 }
 
@@ -1189,13 +1194,14 @@ function composeOneLiner(
   if (hr)
     return `${plural(hr, "high-risk pattern finding")} need a closer look first.`;
   if (k) {
-    const gate = k.merge_gate.safe_for_high_rps_gateway;
-    if (gate === "no" || gate === "conditional") {
-      const liner = (k.merge_gate.one_liner ?? "").trim().replace(/\.$/, "");
+    if (k.decision === "block" || k.decision === "needs_human") {
+      const liner = (k.blocking_reasons[0]?.explanation ?? "")
+        .trim()
+        .replace(/\.$/, "");
       if (liner) return `${liner}.`;
-      return gate === "no"
+      return k.decision === "block"
         ? "Karpathy hold — staff-eng review flagged production risk."
-        : "Karpathy conditional — see merge gate for what's needed.";
+        : "Karpathy needs human judgment — see drilldown.";
     }
   }
   if (t.scope_drift) {
@@ -1349,29 +1355,38 @@ export function renderDrilldown(
     });
   }
   if (k) {
-    const gate = k.merge_gate.safe_for_high_rps_gateway;
-    const glyph = { yes: "✅", conditional: "⚠️", no: "❌" }[gate] ?? "?";
+    const decGlyph =
+      k.decision === "merge" ? "✅" : k.decision === "needs_human" ? "⚠️" : "❌";
     lines.push("\n_Karpathy senior-eng pre-merge review_");
-    const liner = (k.merge_gate.one_liner ?? "").trim();
-    lines.push(`  ${glyph} merge_gate=${gate}${liner ? ` — ${liner}` : ""}`);
-    k.merge_gate.unintended_consequences.forEach((n) =>
-      lines.push(`  • risk: ${n}`),
+    lines.push(`  ${decGlyph} decision=${k.decision}`);
+    if (k.blocking_reasons.length) {
+      lines.push("_Blocking reasons_");
+      k.blocking_reasons.forEach((br) => {
+        lines.push(
+          `  • [${br.category}] \`${br.file}\` ${br.lines} — ${br.explanation}`,
+        );
+        if (br.evidence_snippet.trim())
+          lines.push(`      \`${br.evidence_snippet.slice(0, 400)}\``);
+      });
+    }
+    const rs = k.risk_signals;
+    lines.push("_Risk signals_");
+    lines.push(
+      `  • touches_hot_path=${rs.touches_hot_path}` +
+        (rs.hot_path_functions.length
+          ? ` (${join(rs.hot_path_functions, 5)})`
+          : ""),
     );
-    k.merge_gate.hot_path_notes.forEach((n) =>
-      lines.push(`  • hot path: ${n}`),
+    lines.push(`  • modifies_shared_utils=${rs.modifies_shared_utils}`);
+    lines.push(
+      `  • providers: ${rs.providers_affected.length ? join(rs.providers_affected, 8) : "—"}`,
     );
-    if (k.merge_gate.what_would_make_yes)
-      lines.push(`  • to unblock: ${k.merge_gate.what_would_make_yes}`);
-    k.findings.forEach((f) => {
-      let tag = `[${f.breadth}]`;
-      if (f.regression_archetype) tag += ` (${f.regression_archetype})`;
-      lines.push(`  • ${tag} ${f.bug_class || "?"}`);
-      if (f.fix_locus) lines.push(`      fix locus: ${f.fix_locus}`);
-      if (f.sibling_loci.length)
-        lines.push(`      siblings: ${f.sibling_loci.slice(0, 5).join(", ")}`);
-      if (f.recommended_fix)
-        lines.push(`      recommend: ${f.recommended_fix}`);
-    });
+    lines.push(
+      `  • cross_provider_risk=${rs.cross_provider_risk} · breaks_public_api=${rs.breaks_public_api} · breaks_proxy_config=${rs.breaks_proxy_config}`,
+    );
+    lines.push(
+      `  • tests_added_for_change=${rs.tests_added_for_change} · scope_matches_description=${rs.scope_matches_description}`,
+    );
   }
   if (lines.length === 1)
     lines.push("Nothing to drill into. Card has the full story.");

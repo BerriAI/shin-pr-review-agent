@@ -38,6 +38,9 @@
   .label-empty{background:#eee;color:#888}
   .run-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500}
   .run-meta{font-size:11px;color:#888;display:flex;gap:8px}
+  .run-liner{font-size:11.5px;color:#555;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.4}
+  .run-row.active .run-liner{color:#ccc}
+  .date-group{padding:6px 14px 2px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#aaa;background:#f0f0f3;border-bottom:1px solid #e8e8eb;position:sticky;top:0;z-index:2}
   .empty{color:#999;font-size:13px;text-align:center;padding:32px}
   /* Main column = the rest of the page beside the fixed sidebar. No
      overflow tricks; the document scrolls. */
@@ -50,9 +53,19 @@
   .detail-head h1{font-size:18px;margin:0;flex:1;min-width:300px}
   .pr-link{font-size:12px;color:#06c;text-decoration:none}
   .pr-link:hover{text-decoration:underline}
-  .detail-meta{color:#666;font-size:12px;display:flex;gap:14px;flex-wrap:wrap}
+  .detail-meta{color:#666;font-size:12px;display:flex;gap:14px;flex-wrap:wrap;align-items:center}
   .detail-meta a{color:#06c;text-decoration:none}
   .detail-meta a:hover{text-decoration:underline}
+  .copy-btn{margin-left:auto;padding:5px 12px;border:1px solid #ccc;border-radius:4px;background:#fff;font:inherit;font-size:12px;cursor:pointer;color:#444;white-space:nowrap}
+  .copy-btn:hover{background:#f0f0f7}
+  .copy-btn.copied{background:#d4f4dd;border-color:#0a5;color:#0a5}
+  .json-section{background:#f6f6f9;border:1px solid #e0e0e3;border-radius:6px;margin-bottom:14px;overflow:hidden}
+  .json-section summary{padding:10px 18px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#666;cursor:pointer;user-select:none;list-style:none;display:flex;align-items:center;gap:8px}
+  .json-section summary:hover{background:#eee}
+  .json-section summary::before{content:'▶';font-size:10px;width:12px}
+  details.json-section[open] summary::before{content:'▼'}
+  .json-body{padding:0 18px 14px;max-height:500px;overflow-y:auto}
+  .json-body pre{margin:0;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-word;line-height:1.5;color:#222}
   /* Two-column body. Document-level scroll. The right column is
      position:sticky so the trace tracks the viewport while the left
      scrolls past it. */
@@ -80,9 +93,26 @@
   .detail-right .section{box-shadow:none;background:#fff}
   .section h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#666;font-weight:600}
   .card-text,.drilldown-text{white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;line-height:1.55;color:#222}
-  .trace-item{border-left:3px solid #88a;background:#f0f0f7;padding:6px 10px;margin:6px 0;border-radius:3px;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-word}
-  .trace-call{border-left-color:#5b8}
-  .trace-return{border-left-color:#88a}
+  /* --- Improved trace renderer --- */
+  .trace-entry{margin:0 0 10px;border-radius:5px;overflow:hidden;border:1px solid #e0e0e3;font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+  .trace-entry-call{border-left:3px solid #4a9}
+  .trace-entry-result{border-left:3px solid #88a}
+  .trace-entry-result.trace-error{border-left-color:#c33}
+  .trace-header{display:flex;align-items:center;gap:8px;padding:5px 10px;background:#f5f5f7;border-bottom:1px solid #e8e8ea;user-select:none}
+  .trace-tool-pill{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:1px 6px;border-radius:3px;background:#e0e0e3;color:#555}
+  .trace-dir{font-size:10px;color:#888;letter-spacing:.04em}
+  .trace-seq{margin-left:auto;font-size:10px;color:#bbb}
+  .trace-cmd{margin:0;padding:8px 12px;background:#1e1e2e;color:#cdd6f4;white-space:pre-wrap;word-break:break-word;line-height:1.5;font-size:11px;max-height:200px;overflow-y:auto}
+  .trace-out-text{margin:0;padding:8px 12px;background:#f9f9fb;color:#333;white-space:pre-wrap;word-break:break-word;line-height:1.5;max-height:200px;overflow-y:auto}
+  .trace-error .trace-out-text{background:#fff5f5;color:#900}
+  .trace-truncated{padding:3px 12px 5px;font-size:10.5px;color:#a60;background:#fffbe6;border-top:1px solid #f0e0a0}
+  .trace-err-badge{padding:3px 12px;font-size:10.5px;color:#900;background:#fff0f0;border-bottom:1px solid #fcc}
+  /* --- Data quality flags --- */
+  .dq-flags{margin-bottom:14px}
+  .dq-flag{display:flex;align-items:flex-start;gap:8px;padding:7px 12px;border-radius:4px;font-size:12px;line-height:1.4;margin-bottom:6px}
+  .dq-warn{background:#fffbe6;border:1px solid #f0d060;color:#6b4f00}
+  .dq-info{background:#e8f4ff;border:1px solid #a0c8f0;color:#004080}
+  .dq-icon{font-size:13px;flex-shrink:0;margin-top:1px}
   /* Full-trace renderer (one block per pydantic_ai message part). Each part
      gets a kind-tinted border so the eye can scan a long trace fast. */
   .trace-controls{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
@@ -158,13 +188,33 @@ function verdictBadgeClass(v){
   return 'badge badge-' + (v || 'blocked').toLowerCase();
 }
 
+function dateGroupLabel(ts){
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(today - 86400000);
+  const runDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  if (runDay >= today) return 'Today';
+  if (runDay >= yesterday) return 'Yesterday';
+  return d.toLocaleDateString(undefined, {weekday:'long', month:'short', day:'numeric'});
+}
+
 function renderRunsList(){
   runsListEl.innerHTML = '';
   if (!runs.length) {
     runsListEl.innerHTML = '<div class="empty">No runs yet. They\'ll appear here as the agent reviews PRs.</div>';
     return;
   }
+  let lastGroup = null;
   for (const r of runs) {
+    const group = dateGroupLabel(r.ts);
+    if (group !== lastGroup) {
+      const hdr = document.createElement('div');
+      hdr.className = 'date-group';
+      hdr.textContent = group;
+      runsListEl.appendChild(hdr);
+      lastGroup = group;
+    }
     const row = document.createElement('div');
     row.className = 'run-row' + (r.run_id === activeRunId ? ' active' : '');
     row.dataset.id = r.run_id;
@@ -184,15 +234,24 @@ function renderRunsList(){
     top.appendChild(labelTag);
     const title = document.createElement('div');
     title.className = 'run-title';
-    title.textContent = '#' + r.pr_number + ' ' + r.pr_title;
+    // pr_title sometimes echoes the URL when triage couldn't extract a title
+    const displayTitle = (r.pr_title && !r.pr_title.startsWith('http'))
+      ? '#' + r.pr_number + ' ' + r.pr_title
+      : '#' + r.pr_number;
+    title.textContent = displayTitle;
+    const liner = document.createElement('div');
+    liner.className = 'run-liner';
+    liner.textContent = r.verdict_one_liner || '';
     const meta = document.createElement('div');
     meta.className = 'run-meta';
-    const parts = [r.pr_author, fmtTime(r.ts)];
+    const parts = [];
+    if (r.pr_author) parts.push(r.pr_author);
+    parts.push(new Date(r.ts * 1000).toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'}));
     if (r.duration_s != null) parts.push(fmtDuration(r.duration_s));
-    if (r.cost_usd != null) parts.push(fmtCost(r.cost_usd));
     meta.textContent = parts.join(' · ');
     row.appendChild(top);
     row.appendChild(title);
+    if (r.verdict_one_liner) row.appendChild(liner);
     row.appendChild(meta);
     row.addEventListener('click', () => loadDetail(r.run_id));
     runsListEl.appendChild(row);
@@ -204,16 +263,91 @@ function escapeHtml(s){
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 }
 
+function unwrapPreview(preview){
+  if (!preview) return { text: '', truncated: false };
+  // Preview = first 240 chars of JSON.stringify({"content":[{"type":"text","text":"..."}]})
+  // Try complete match first (closing quote present)
+  const full = preview.match(/"text":"((?:[^"\\]|\\.)*)"/);
+  if (full) {
+    let text;
+    try { text = JSON.parse('"' + full[1] + '"'); }
+    catch { text = full[1].replace(/\\n/g,'\n').replace(/\\t/g,'\t').replace(/\\"/g,'"').replace(/\\\\/g,'\\'); }
+    return { text, truncated: preview.length >= 238 };
+  }
+  // Partial match — truncated before closing quote
+  const partial = preview.match(/"text":"((?:[^"\\]|\\.)*)/);
+  if (partial) {
+    const raw = partial[1];
+    let text;
+    try { text = JSON.parse('"' + raw + '"'); }
+    catch { text = raw.replace(/\\n/g,'\n').replace(/\\t/g,'\t').replace(/\\"/g,'"').replace(/\\\\/g,'\\'); }
+    return { text: text + '…', truncated: true };
+  }
+  return { text: preview, truncated: preview.length >= 238 };
+}
+
 function renderTrace(trace){
   if (!trace || !trace.length) return '<em style="color:#999">No tool calls recorded.</em>';
-  return trace.map(t => {
-    const cls = t.kind === 'call' ? 'trace-call' : 'trace-return';
-    const arrow = t.kind === 'call' ? '→' : '←';
-    const body = t.kind === 'call'
-      ? t.tool + '(' + JSON.stringify(t.args) + ')'
-      : t.tool + ' returned: ' + (t.preview || '');
-    return '<div class="trace-item ' + cls + '">' + arrow + ' ' + escapeHtml(body) + '</div>';
+  return trace.map((t, i) => {
+    if (t.kind === 'call') {
+      const cmd = (t.args && t.args.command) ? t.args.command : JSON.stringify(t.args || {}, null, 2);
+      return `<div class="trace-entry trace-entry-call">
+        <div class="trace-header">
+          <span class="trace-tool-pill">${escapeHtml(t.tool)}</span>
+          <span class="trace-dir">→ call</span>
+          <span class="trace-seq">#${i+1}</span>
+        </div>
+        <pre class="trace-cmd">${escapeHtml(cmd)}</pre>
+      </div>`;
+    } else {
+      const { text, truncated } = unwrapPreview(t.preview || '');
+      const errClass = t.isError ? ' trace-error' : '';
+      return `<div class="trace-entry trace-entry-result${errClass}">
+        <div class="trace-header">
+          <span class="trace-tool-pill">${escapeHtml(t.tool || 'result')}</span>
+          <span class="trace-dir">← result</span>
+          <span class="trace-seq">#${i+1}</span>
+        </div>
+        ${t.isError ? '<div class="trace-err-badge">⚠ error</div>' : ''}
+        <pre class="trace-out-text">${escapeHtml(text)}</pre>
+        ${truncated ? '<div class="trace-truncated">⚠ preview truncated at 240 chars — full output not stored</div>' : ''}
+      </div>`;
+    }
   }).join('');
+}
+
+function buildDataQualityFlags(rec){
+  const flags = [];
+  const triage = rec.triage || {};
+  const trace = rec.tool_trace || [];
+  const previewText = trace.filter(t => t.kind === 'result').map(t => (t.preview || '').toLowerCase()).join(' ');
+
+  if ((triage.greptile_score === null || triage.greptile_score === undefined) && previewText.includes('greptile')) {
+    flags.push({ level:'warn', msg:'greptile_score=null but greptile content visible in tool trace — agent likely saw the comment but failed to extract a numeric score (look for "Confidence Score: X/5" format in the result previews below)' });
+  }
+  const summary = triage.pr_summary || '';
+  if (/^(I'(ll|m)|I will|Let me|I'll start|I need to)/i.test(summary)) {
+    flags.push({ level:'warn', msg:'pr_summary contains agent reasoning prose instead of a clean description — JSON extraction succeeded but pr_summary field was populated with the agent\'s internal monologue' });
+  }
+  const title = triage.pr_title || '';
+  if (title.startsWith('http')) {
+    flags.push({ level:'warn', msg:'pr_title echoes the URL — agent failed to extract the real PR title from the GitHub API response' });
+  }
+  if (!triage.pr_author) {
+    flags.push({ level:'info', msg:'pr_author is empty — GitHub API may have returned an unexpected shape or the field was missed during extraction' });
+  }
+  if (triage.files_changed === 0 && previewText.includes('modified')) {
+    flags.push({ level:'info', msg:'files_changed=0 but tool trace shows file modifications — this field is always overwritten server-side (known behavior)' });
+  }
+  return flags;
+}
+
+function renderDataQualityFlags(flags){
+  if (!flags.length) return '';
+  return '<div class="dq-flags">' + flags.map(f => {
+    const icon = f.level === 'warn' ? '⚠' : 'ℹ';
+    return `<div class="dq-flag dq-${f.level}"><span class="dq-icon">${icon}</span><span>${escapeHtml(f.msg)}</span></div>`;
+  }).join('') + '</div>';
 }
 
 // --- Full pydantic_ai message renderer ---------------------------------------
@@ -332,6 +466,78 @@ function switchArm(arm, rec){
   }
 }
 
+function buildDebugDump(rec){
+  const card = rec.card || {};
+  const lines = [];
+  lines.push('=== RUN DEBUG DUMP ===');
+  lines.push('PR:       ' + rec.pr_url);
+  lines.push('Title:    #' + rec.pr_number + ' ' + (rec.pr_title || ''));
+  lines.push('Author:   ' + (rec.pr_author || ''));
+  lines.push('Reviewed: ' + fmtTime(rec.ts));
+  lines.push('Duration: ' + fmtDuration(rec.duration_s));
+  lines.push('Source:   ' + (rec.source || ''));
+  lines.push('');
+  lines.push('=== VERDICT ===');
+  lines.push((card.emoji || '') + ' ' + card.score + '/5 ' + (card.verdict || ''));
+  if (card.verdict_one_liner) lines.push(card.verdict_one_liner);
+  if (card.justification) lines.push(card.justification);
+  lines.push('');
+  lines.push('=== CARD TEXT ===');
+  lines.push(renderCardText(card));
+  lines.push('');
+  lines.push('=== DRILLDOWN ===');
+  lines.push(renderDrilldownText(rec));
+  lines.push('');
+  lines.push('=== TRIAGE REPORT (structured JSON) ===');
+  lines.push(JSON.stringify(rec.triage || {}, null, 2));
+  lines.push('');
+  lines.push('=== PATTERN REPORT (structured JSON) ===');
+  lines.push(JSON.stringify(rec.pattern || {}, null, 2));
+  lines.push('');
+  if (rec.karpathy_check && Object.keys(rec.karpathy_check).length) {
+    lines.push('=== KARPATHY CHECK (structured JSON) ===');
+    lines.push(JSON.stringify(rec.karpathy_check, null, 2));
+    lines.push('');
+  }
+  lines.push('=== TOOL TRACE ===');
+  const trace = rec.tool_trace || [];
+  if (!trace.length) {
+    lines.push('(none)');
+  } else {
+    for (const t of trace) {
+      if (t.kind === 'call') {
+        lines.push('→ ' + t.tool + '(' + JSON.stringify(t.args) + ')');
+      } else {
+        lines.push('← ' + t.tool + ' returned: ' + (t.preview || ''));
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+async function copyDebugDump(rec){
+  const btn = document.getElementById('copy-dump-btn');
+  const text = buildDebugDump(rec);
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy debug dump'; btn.classList.remove('copied'); }, 2000);
+  } catch {
+    // fallback: select a textarea
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy debug dump'; btn.classList.remove('copied'); }, 2000);
+  }
+}
+
 function logfireLink(rec){
   if (!rec.logfire_trace_id) return '';
   // Generic Logfire trace deep-link. Self-host users can set their own
@@ -372,6 +578,7 @@ function renderDetail(rec){
         <a href="${escapeHtml(rec.pr_url)}" target="_blank" class="pr-link">View on GitHub ↗</a>
         <span>${fmtTime(rec.ts)} · ${fmtDuration(rec.duration_s)} · ${fmtCost(rec.cost_usd)}${tokenLine}</span>
         <span>${escapeHtml(rec.model_name || '')}${logfireLink(rec)}</span>
+        <button id="copy-dump-btn" class="copy-btn" type="button">Copy debug dump</button>
       </div>
     </div>
     <div class="detail-body">
@@ -384,6 +591,21 @@ function renderDetail(rec){
           <h3>Drill-down</h3>
           <div class="drilldown-text">${escapeHtml(drilldown)}</div>
         </div>
+        ${renderDataQualityFlags(buildDataQualityFlags(rec))}
+        <details class="json-section">
+          <summary>Triage report (full JSON)</summary>
+          <div class="json-body"><pre>${escapeHtml(JSON.stringify(rec.triage || {}, null, 2))}</pre></div>
+        </details>
+        ${(rec.pattern && (rec.pattern.findings || []).length) ? `
+        <details class="json-section">
+          <summary>Pattern report (full JSON)</summary>
+          <div class="json-body"><pre>${escapeHtml(JSON.stringify(rec.pattern, null, 2))}</pre></div>
+        </details>` : ''}
+        ${(rec.karpathy_check && Object.keys(rec.karpathy_check).length) ? `
+        <details class="json-section">
+          <summary>Karpathy check (full JSON)</summary>
+          <div class="json-body"><pre>${escapeHtml(JSON.stringify(rec.karpathy_check, null, 2))}</pre></div>
+        </details>` : ''}
         <div class="section">
           <h3>Tool trace (skim)</h3>
           ${renderTrace(rec.tool_trace)}
@@ -430,6 +652,7 @@ function renderDetail(rec){
       </div>
     </div>
   `;
+  document.getElementById('copy-dump-btn').addEventListener('click', () => copyDebugDump(rec));
   document.getElementById('save-btn').addEventListener('click', () => saveLabel(rec.run_id));
   document.getElementById('graduate-btn').addEventListener('click', () => graduate(rec.run_id));
   for (const btn of document.querySelectorAll('.arm-tab')) {

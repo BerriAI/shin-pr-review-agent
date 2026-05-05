@@ -250,6 +250,7 @@ app.get("/runs/api/runs", requireLogin, async (_req, res) => {
       score: r.score,
       verdict: r.verdict || "BLOCKED",
       emoji: r.emoji || "⚠️",
+      verdict_one_liner: r.verdict_one_liner || "",
       duration_s: r.duration_s,
       cost_usd: r.cost_usd,
       human_label: r.human_label,

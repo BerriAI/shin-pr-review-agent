@@ -113,7 +113,8 @@ export async function listRunsSummary(opts: {
            source, duration_s, cost_usd, human_label,
            card->>'score' AS score_str,
            card->>'verdict' AS verdict,
-           card->>'emoji' AS emoji
+           card->>'emoji' AS emoji,
+           card->>'verdict_one_liner' AS verdict_one_liner
     FROM runs ${whereSql}
     ORDER BY ts DESC LIMIT $${args.length}
   `;

@@ -557,10 +557,11 @@ app.post("/webhook/github", (req, res) => {
     console.log(
       `[webhook] delivery=${delivery} triggering review for ${pr.html_url} sha=${pr.head.sha} (action=${action} commentId=${commentId})`,
     );
-    await reviewPr(pr.html_url, { source: "webhook" });
+    const { runId } = await reviewPr(pr.html_url, { source: "webhook" });
     console.log(
       `[webhook] delivery=${delivery} review complete for PR #${prNumber} sha=${pr.head.sha} elapsedMs=${Date.now() - t0}`,
     );
+    await stabilizePr(installationId, repoFullName, prNumber, pr.html_url, pr.head.sha, runId);
   })().catch((err) => {
     console.error(
       `[webhook] delivery=${delivery} failed for PR #${prNumber}:`,
@@ -1089,6 +1090,146 @@ app.post("/api/v1/backfill", requireLogin, async (req, res) => {
     console.log(`[backfill] done — reviewed ${eligible.length} PRs`);
   })().catch(console.error);
 });
+
+// --- Stabilize stage: re-run unrelated CI failures up to N times --------------
+
+async function getJobIdForCheck(
+  token: string,
+  repoFullName: string,
+  sha: string,
+  checkName: string,
+): Promise<number | null> {
+  const r = await fetch(
+    `https://api.github.com/repos/${repoFullName}/commits/${sha}/check-runs?check_name=${encodeURIComponent(checkName)}&filter=latest&per_page=5`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    },
+  );
+  if (!r.ok) return null;
+  const data = (await r.json()) as { check_runs: Array<{ details_url?: string }> };
+  const detailsUrl = data.check_runs[0]?.details_url ?? "";
+  // e.g. https://github.com/owner/repo/actions/runs/12345/job/67890
+  const m = detailsUrl.match(/\/actions\/runs\/\d+\/job\/(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+async function rerunActionsJob(
+  token: string,
+  repoFullName: string,
+  jobId: number,
+): Promise<void> {
+  const r = await fetch(
+    `https://api.github.com/repos/${repoFullName}/actions/jobs/${jobId}/rerun`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    },
+  );
+  if (!r.ok && r.status !== 403) {
+    // 403 = Actions write permission missing — log and continue
+    console.warn(`[stabilize] rerun job ${jobId} → ${r.status}: ${await r.text().catch(() => "")}`);
+  }
+}
+
+async function waitForChecks(
+  token: string,
+  repoFullName: string,
+  sha: string,
+  checkNames: string[],
+  timeoutMs = 25 * 60 * 1000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((res) => setTimeout(res, 30_000));
+    const r = await fetch(
+      `https://api.github.com/repos/${repoFullName}/commits/${sha}/check-runs?per_page=100`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      },
+    );
+    if (!r.ok) continue;
+    const data = (await r.json()) as { check_runs: Array<{ name: string; status: string }> };
+    const active = data.check_runs.filter(
+      (cr) =>
+        checkNames.includes(cr.name) &&
+        (cr.status === "queued" || cr.status === "in_progress"),
+    );
+    console.log(`[stabilize] waiting: ${active.length} checks still active`);
+    if (active.length === 0) return;
+  }
+  console.warn(`[stabilize] waitForChecks timed out after ${timeoutMs / 60000}min`);
+}
+
+async function stabilizePr(
+  installationId: number,
+  repoFullName: string,
+  prNumber: number,
+  prUrl: string,
+  headSha: string,
+  initialRunId: string,
+  maxLoops = 3,
+): Promise<void> {
+  let currentRunId = initialRunId;
+
+  for (let loop = 0; loop < maxLoops; loop++) {
+    const run = await db.getRun(currentRunId);
+    const triage = run?.triage as Record<string, unknown> | null;
+    const unrelated: string[] = (triage?.unrelated_failures as string[]) ?? [];
+
+    if (!unrelated.length) {
+      console.log(`[stabilize] PR #${prNumber} loop=${loop} no unrelated failures — done`);
+      return;
+    }
+
+    console.log(`[stabilize] PR #${prNumber} loop=${loop} unrelated=${unrelated.join(", ")}`);
+
+    // Refresh token each loop (expires in 1hr; loops can take 20+ min)
+    const token = await getInstallationToken(installationId).catch(() => null);
+    if (!token) {
+      console.warn(`[stabilize] could not get token, aborting`);
+      return;
+    }
+
+    // Resolve job IDs and fire re-runs
+    const jobIds = (
+      await Promise.all(
+        unrelated.map((name) => getJobIdForCheck(token, repoFullName, headSha, name)),
+      )
+    ).filter((id): id is number => id !== null);
+
+    if (!jobIds.length) {
+      console.warn(`[stabilize] PR #${prNumber} loop=${loop} could not resolve any job IDs — check Actions write permission`);
+      return;
+    }
+
+    // TODO: CircleCI checks need a separate CIRCLECI_TOKEN env var + CircleCI API
+    await Promise.all(jobIds.map((id) => rerunActionsJob(token, repoFullName, id)));
+    console.log(`[stabilize] PR #${prNumber} loop=${loop} re-ran ${jobIds.length} job(s), waiting…`);
+
+    await waitForChecks(token, repoFullName, headSha, unrelated);
+
+    // Re-review with updated check results
+    console.log(`[stabilize] PR #${prNumber} loop=${loop} checks settled, re-reviewing`);
+    const { runId: newRunId } = await reviewPr(prUrl, {
+      source: `webhook_stabilize_${loop + 1}`,
+    });
+    currentRunId = newRunId;
+  }
+
+  console.log(`[stabilize] PR #${prNumber} reached max loops (${maxLoops})`);
+}
 
 // --- Staging PRs list ---------------------------------------------------------
 

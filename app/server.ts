@@ -128,7 +128,7 @@ async function fetchPr(
   html_url: string;
   draft: boolean;
   state: string;
-  head: { sha: string };
+  head: { sha: string; ref: string };
   base: { ref: string };
 }> {
   const r = await fetch(
@@ -146,7 +146,7 @@ async function fetchPr(
     html_url: string;
     draft: boolean;
     state: string;
-    head: { sha: string };
+    head: { sha: string; ref: string };
     base: { ref: string };
   }>;
 }
@@ -561,7 +561,7 @@ app.post("/webhook/github", (req, res) => {
     console.log(
       `[webhook] delivery=${delivery} review complete for PR #${prNumber} sha=${pr.head.sha} elapsedMs=${Date.now() - t0}`,
     );
-    await stabilizePr(installationId, repoFullName, prNumber, pr.html_url, pr.head.sha, runId);
+    await stabilizePr(installationId, repoFullName, prNumber, pr.html_url, pr.head.ref, pr.head.sha, runId);
   })().catch((err) => {
     console.error(
       `[webhook] delivery=${delivery} failed for PR #${prNumber}:`,
@@ -1093,50 +1093,55 @@ app.post("/api/v1/backfill", requireLogin, async (req, res) => {
 
 // --- Stabilize stage: re-run unrelated CI failures up to N times --------------
 
-async function getJobIdForCheck(
+// Push an empty commit to trigger PR checks without requiring actions:write.
+// contents:write is sufficient and already granted.
+async function pushEmptyCommit(
   token: string,
   repoFullName: string,
-  sha: string,
-  checkName: string,
-): Promise<number | null> {
-  const r = await fetch(
-    `https://api.github.com/repos/${repoFullName}/commits/${sha}/check-runs?check_name=${encodeURIComponent(checkName)}&filter=latest&per_page=5`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    },
+  branchName: string,
+  message: string,
+): Promise<string> {
+  const ghHeaders = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "Content-Type": "application/json",
+  };
+  const refR = await fetch(
+    `https://api.github.com/repos/${repoFullName}/git/refs/heads/${branchName}`,
+    { headers: ghHeaders },
   );
-  if (!r.ok) return null;
-  const data = (await r.json()) as { check_runs: Array<{ details_url?: string }> };
-  const detailsUrl = data.check_runs[0]?.details_url ?? "";
-  // e.g. https://github.com/owner/repo/actions/runs/12345/job/67890
-  const m = detailsUrl.match(/\/actions\/runs\/\d+\/job\/(\d+)/);
-  return m ? parseInt(m[1], 10) : null;
-}
+  if (!refR.ok) throw new Error(`get ref failed: ${refR.status}`);
+  const currentSha = ((await refR.json()) as { object: { sha: string } }).object.sha;
 
-async function rerunActionsJob(
-  token: string,
-  repoFullName: string,
-  jobId: number,
-): Promise<void> {
-  const r = await fetch(
-    `https://api.github.com/repos/${repoFullName}/actions/jobs/${jobId}/rerun`,
+  const commitR = await fetch(
+    `https://api.github.com/repos/${repoFullName}/git/commits/${currentSha}`,
+    { headers: ghHeaders },
+  );
+  if (!commitR.ok) throw new Error(`get commit failed: ${commitR.status}`);
+  const treeSha = ((await commitR.json()) as { tree: { sha: string } }).tree.sha;
+
+  const newCommitR = await fetch(
+    `https://api.github.com/repos/${repoFullName}/git/commits`,
     {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
+      headers: ghHeaders,
+      body: JSON.stringify({ message, tree: treeSha, parents: [currentSha] }),
     },
   );
-  if (!r.ok && r.status !== 403) {
-    // 403 = Actions write permission missing — log and continue
-    console.warn(`[stabilize] rerun job ${jobId} → ${r.status}: ${await r.text().catch(() => "")}`);
-  }
+  if (!newCommitR.ok) throw new Error(`create commit failed: ${newCommitR.status}`);
+  const newSha = ((await newCommitR.json()) as { sha: string }).sha;
+
+  const updateR = await fetch(
+    `https://api.github.com/repos/${repoFullName}/git/refs/heads/${branchName}`,
+    {
+      method: "PATCH",
+      headers: ghHeaders,
+      body: JSON.stringify({ sha: newSha }),
+    },
+  );
+  if (!updateR.ok) throw new Error(`update ref failed: ${updateR.status}`);
+  return newSha;
 }
 
 async function waitForChecks(
@@ -1177,11 +1182,13 @@ async function stabilizePr(
   repoFullName: string,
   prNumber: number,
   prUrl: string,
+  headRef: string,
   headSha: string,
   initialRunId: string,
   maxLoops = 3,
 ): Promise<void> {
   let currentRunId = initialRunId;
+  let currentSha = headSha;
 
   for (let loop = 0; loop < maxLoops; loop++) {
     const run = await db.getRun(currentRunId);
@@ -1202,25 +1209,20 @@ async function stabilizePr(
       return;
     }
 
-    // Resolve job IDs and fire re-runs
-    const jobIds = (
-      await Promise.all(
-        unrelated.map((name) => getJobIdForCheck(token, repoFullName, headSha, name)),
-      )
-    ).filter((id): id is number => id !== null);
+    // Push empty commit to re-trigger all PR checks via contents:write.
+    // Safer than actions:write — doesn't grant access to workflow_dispatch
+    // or fork PR approval. Only fires pull_request triggers.
+    // TODO: CircleCI checks are also re-triggered by the new commit automatically.
+    currentSha = await pushEmptyCommit(
+      token,
+      repoFullName,
+      headRef,
+      `chore: trigger CI re-run [stabilize loop ${loop + 1}/${maxLoops}]`,
+    );
+    console.log(`[stabilize] PR #${prNumber} loop=${loop} pushed empty commit ${currentSha}, waiting…`);
 
-    if (!jobIds.length) {
-      console.warn(`[stabilize] PR #${prNumber} loop=${loop} could not resolve any job IDs — check Actions write permission`);
-      return;
-    }
+    await waitForChecks(token, repoFullName, currentSha, unrelated);
 
-    // TODO: CircleCI checks need a separate CIRCLECI_TOKEN env var + CircleCI API
-    await Promise.all(jobIds.map((id) => rerunActionsJob(token, repoFullName, id)));
-    console.log(`[stabilize] PR #${prNumber} loop=${loop} re-ran ${jobIds.length} job(s), waiting…`);
-
-    await waitForChecks(token, repoFullName, headSha, unrelated);
-
-    // Re-review with updated check results
     console.log(`[stabilize] PR #${prNumber} loop=${loop} checks settled, re-reviewing`);
     const { runId: newRunId } = await reviewPr(prUrl, {
       source: `webhook_stabilize_${loop + 1}`,

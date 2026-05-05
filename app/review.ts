@@ -41,6 +41,18 @@ function dbg(tag: string, ...rest: unknown[]): void {
   console.log(`[debug +${ms}ms] ${tag}`, ...rest);
 }
 
+// Stringify for debug logs without dumping multi-megabyte payloads.
+function _previewForDbg(v: unknown, max = 800): string {
+  let s: string;
+  try {
+    s = typeof v === "string" ? v : JSON.stringify(v);
+  } catch {
+    s = String(v);
+  }
+  if (s == null) return "";
+  return s.length > max ? `${s.slice(0, max)}…[+${s.length - max} chars]` : s;
+}
+
 // --- Pi SDK shared infra (initialised once) -----------------------------------
 
 export let authStorage!: AuthStorage;
@@ -182,7 +194,7 @@ export async function runPrompt(
       const id = event.toolCallId ?? `${event.toolName}:${trace.length}`;
       pending.set(id, event.toolName);
       dbg(
-        `runPrompt[${promptId}]: tool_execution_start tool=${event.toolName} id=${id}`,
+        `runPrompt[${promptId}]: tool_execution_start tool=${event.toolName} id=${id} args=${_previewForDbg(event.args ?? {})}`,
       );
       trace.push({
         kind: "call",
@@ -202,7 +214,7 @@ export async function runPrompt(
       const s = typeof raw === "string" ? raw : JSON.stringify(raw);
       const preview = s.length > 240 ? s.slice(0, 240) + "…" : s;
       dbg(
-        `runPrompt[${promptId}]: tool_execution_end tool=${name} isError=${!!event.isError}`,
+        `runPrompt[${promptId}]: tool_execution_end tool=${name} isError=${!!event.isError} resultLen=${s.length} resultPreview=${_previewForDbg(s, 800)}`,
       );
       trace.push({
         kind: "result",
@@ -537,6 +549,7 @@ const PATTERN_OUTPUT_OVERRIDE =
 // --- System prompt assembly ---------------------------------------------------
 
 let TRIAGE_SYSTEM: string;
+let TRIAGE_SYSTEM_SINGLE_SHOT: string;
 let KARPATHY_SYSTEM: string;
 let CHAT_SYSTEM: string;
 let PATTERN_SYSTEM_SINGLE_SHOT: string;
@@ -546,11 +559,31 @@ export function initSystemPrompts(): void {
   const patternSkill = loadSkill("pattern.md");
   const karpathySkill = loadSkill("karpathy.md");
 
+  // Tool-loop variant — kept for backwards compat / non-default codepaths.
+  // The default reviewPr() path now uses TRIAGE_SYSTEM_SINGLE_SHOT below,
+  // because letting the model decide when to call gather_pr_triage_data.ts
+  // is unreliable: it routinely freelances `curl` against api.github.com
+  // instead, missing the deterministic Greptile-detection / policy-check
+  // logic baked into the gather script. See _triageSingleShot below.
   TRIAGE_SYSTEM =
     pathRedirect("gather_pr_triage_data.py", GATHER_SCRIPT) +
     triageSkill +
     "\n\n" +
     TRIAGE_OUTPUT_OVERRIDE;
+
+  // Single-shot variant — gather has already been run by the orchestrator;
+  // the JSON it produced is embedded in the user message. The model must
+  // not call any tool. Mirrors PATTERN_SYSTEM_SINGLE_SHOT below.
+  TRIAGE_SYSTEM_SINGLE_SHOT =
+    "All context is pre-loaded below — do NOT call any tool or run bash or curl. " +
+    "Analyze only what is provided in this prompt. The gather script has " +
+    "already been executed for you and its full JSON output is embedded in " +
+    "the user message under `## Gather output`. Treat that JSON as authoritative; " +
+    "do not re-fetch any of it.\n\n" +
+    triageSkill +
+    "\n\n" +
+    TRIAGE_OUTPUT_OVERRIDE +
+    "\n\nPrint your JSON on the LAST LINE of your response. Single-line JSON only.";
 
   PATTERN_SYSTEM_SINGLE_SHOT =
     "All context is pre-loaded below — do NOT call any tool or run bash. " +
@@ -745,6 +778,17 @@ async function newSession(
   dbg(
     `newSession: ENTER toolCount=${extraTools.length} model=${model ? ((model as any).id ?? "?") : "<none>"} systemPromptLen=${systemPrompt.length}`,
   );
+  // Print the head of the system prompt so we can confirm the path-redirect
+  // line ("instead run `npx tsx …gather_pr_triage_data.ts`") is actually
+  // present — if it's missing or truncated by the SDK, the agent will
+  // freelance curl commands instead of calling the gather script.
+  dbg(
+    `newSession: systemPrompt[0..600]=${_previewForDbg(systemPrompt.slice(0, 600), 600)}`,
+  );
+  const hasGatherRedirect =
+    systemPrompt.includes("gather_pr_triage_data.ts") ||
+    systemPrompt.includes("gather_pattern_local.ts");
+  dbg(`newSession: hasGatherRedirect=${hasGatherRedirect}`);
   const { session } = await createAgentSession({
     sessionManager: SessionManager.inMemory(),
     authStorage,
@@ -1190,26 +1234,6 @@ function prNumberFromUrl(url: string): number | null {
   return m ? parseInt(m[1], 10) : null;
 }
 
-/** When the model returns prose instead of JSON, still drive fuse/drilldown; full text is appended under *Drill-down*. */
-function triageReportFromPlainOutput(
-  prUrl: string,
-  prose: string,
-): TriageReport {
-  const trimmed = prose.trim();
-  const summary =
-    trimmed.length <= 600
-      ? trimmed || "(empty triage response)"
-      : `${trimmed.slice(0, 597)}…`;
-  const n = prNumberFromUrl(prUrl);
-  return TriageReportSchema.parse({
-    pr_number: n ?? 0,
-    pr_title: prUrl,
-    pr_author: "",
-    pr_summary: summary,
-    has_circleci_checks: false,
-  });
-}
-
 // --- Single-shot pattern review (local gather + one LLM call, no tool loop) ---
 
 const _MAX_PATCH = 800;
@@ -1217,15 +1241,20 @@ const _MAX_DOC = 500;
 const _MAX_SIB = 400;
 const _MAX_PROMPT = 12_000;
 
+// Generic gather-script runner. Used by both pattern and triage single-shot
+// flows — pass the script path and a short `label` (used in the user-facing
+// progress log line and the dbg trace tag).
 function _runGatherLocal(
   prUrl: string,
   log: (m: string) => void,
+  scriptPath: string = PATTERN_GATHER_SCRIPT,
+  label: string = "pattern",
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
-    log("pattern: running local gather");
-    dbg(`_runGatherLocal: spawning npx tsx ${PATTERN_GATHER_SCRIPT} ${prUrl}`);
-    const child = spawn("npx", ["tsx", PATTERN_GATHER_SCRIPT, prUrl], {
+    log(`${label}: running local gather`);
+    dbg(`_runGatherLocal[${label}]: spawning npx tsx ${scriptPath} ${prUrl}`);
+    const child = spawn("npx", ["tsx", scriptPath, prUrl], {
       env: { ...process.env },
     });
     let stdout = "";
@@ -1243,7 +1272,7 @@ function _runGatherLocal(
     });
     child.on("close", (code: number) => {
       dbg(
-        `_runGatherLocal: child closed code=${code} elapsed=${Date.now() - t0}ms stdoutLen=${stdout.length} stderrLen=${stderr.length}`,
+        `_runGatherLocal[${label}]: child closed code=${code} elapsed=${Date.now() - t0}ms stdoutLen=${stdout.length} stderrLen=${stderr.length}`,
       );
       if (code !== 0)
         reject(new Error(`gather exited ${code}: ${stderr.slice(0, 400)}`));
@@ -1256,7 +1285,7 @@ function _runGatherLocal(
       }
     });
     child.on("error", (err) => {
-      dbg(`_runGatherLocal: child error event`, err);
+      dbg(`_runGatherLocal[${label}]: child error event`, err);
       reject(err);
     });
   });
@@ -1434,6 +1463,248 @@ async function _patternSingleShot(
   });
 }
 
+// --- Single-shot triage (local gather + one LLM call, no tool loop) ---------
+
+// Cap defends against unexpected gather-output bloat; typical real PRs land
+// well under this (PR #27150 ≈2KB, PR #27110 ≈28KB). If we ever exceed it
+// we'd need to truncate field-by-field rather than at the byte level (since
+// chopping mid-JSON would break parsing for the model).
+const _MAX_TRIAGE_PROMPT = 80_000;
+
+function _buildTriagePrompt(
+  prUrl: string,
+  g: Record<string, unknown>,
+): string {
+  // The TRIAGE_OUTPUT_OVERRIDE references gather field names by exact key
+  // (e.g. failing_check_contexts, is_policy_meta, also_failing_on_other_prs,
+  // greptile_score, mergeable, mergeable_state, diff_files). Hand the model
+  // the raw JSON so those references resolve unambiguously — no paraphrasing.
+  let payload = JSON.stringify(g, null, 2);
+  let truncated = false;
+  if (payload.length > _MAX_TRIAGE_PROMPT) {
+    payload = payload.slice(0, _MAX_TRIAGE_PROMPT);
+    truncated = true;
+  }
+  const tail = truncated ? "\n... [gather output truncated for length]" : "";
+  return (
+    `PR: ${prUrl}\n\n` +
+    `## Gather output\n\n` +
+    `\`\`\`json\n${payload}${tail}\n\`\`\`\n`
+  );
+}
+
+async function _triageSingleShot(
+  prUrl: string,
+  log: (m: string) => void,
+): Promise<{ output: string; gather: Record<string, unknown> }> {
+  const gatherData = await _runGatherLocal(prUrl, log, GATHER_SCRIPT, "triage");
+  const userPrompt = _buildTriagePrompt(prUrl, gatherData);
+  log(`triage: single-shot LLM call, prompt=${userPrompt.length} chars`);
+  dbg(
+    `_triageSingleShot: gatherKeys=${Object.keys(gatherData).join(",")} ` +
+      `greptile_score=${gatherData.greptile_score} ` +
+      `failing=${(gatherData.failing_check_contexts as unknown[] | undefined)?.length ?? 0} ` +
+      `diff_files=${(gatherData.diff_files as unknown[] | undefined)?.length ?? 0}`,
+  );
+
+  const base =
+    _litellmBase ?? process.env.LITELLM_API_BASE?.replace(/\/+$/, "");
+  const key = _litellmKey ?? process.env.LITELLM_API_KEY;
+  const model =
+    defaultModelId ??
+    process.env.LITELLM_DEFAULT_MODEL ??
+    "anthropic/claude-sonnet-4-6";
+
+  // Same OpenInference manual-instrumentation shape as _patternSingleShot —
+  // this fetch bypasses the pi-ai SDK auto-instrumentation, so we emit the
+  // semantic-conventions attributes by hand to keep the span consistent.
+  const content = await llmTracer.startActiveSpan(
+    "chat litellm",
+    async (span) => {
+      const messages = [
+        { role: "system", content: TRIAGE_SYSTEM_SINGLE_SHOT },
+        { role: "user", content: userPrompt },
+      ];
+      const requestBody = { model, max_tokens: 4096, messages };
+
+      span.setAttributes({
+        [SemanticConventions.OPENINFERENCE_SPAN_KIND]:
+          OpenInferenceSpanKind.LLM,
+        [SemanticConventions.LLM_SYSTEM]: "litellm",
+        [SemanticConventions.LLM_PROVIDER]: "litellm",
+        [SemanticConventions.LLM_MODEL_NAME]: model,
+        [SemanticConventions.LLM_INVOCATION_PARAMETERS]: JSON.stringify({
+          max_tokens: 4096,
+        }),
+        "pr.url": prUrl,
+        "pr.review.kind": "triage_single_shot",
+      });
+      if (CAPTURE_PROMPTS) {
+        span.setAttribute(
+          SemanticConventions.INPUT_VALUE,
+          JSON.stringify(messages),
+        );
+        span.setAttribute(
+          SemanticConventions.INPUT_MIME_TYPE,
+          "application/json",
+        );
+        messages.forEach((m, i) => {
+          span.setAttribute(
+            `${SemanticConventions.LLM_INPUT_MESSAGES}.${i}.${SemanticConventions.MESSAGE_ROLE}`,
+            m.role,
+          );
+          span.setAttribute(
+            `${SemanticConventions.LLM_INPUT_MESSAGES}.${i}.${SemanticConventions.MESSAGE_CONTENT}`,
+            m.content,
+          );
+        });
+      }
+
+      try {
+        const resp = await fetch(`${base}/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${key}`,
+          },
+          body: JSON.stringify(requestBody),
+        });
+        if (!resp.ok) {
+          const txt = await resp.text();
+          throw new Error(
+            `LLM call failed HTTP ${resp.status}: ${txt.slice(0, 300)}`,
+          );
+        }
+        const json = (await resp.json()) as {
+          id?: string;
+          model?: string;
+          choices: Array<{
+            message: { content: string };
+            finish_reason?: string;
+          }>;
+          usage?: {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            total_tokens?: number;
+          };
+        };
+        const out = json.choices[0]?.message?.content ?? "";
+
+        if (json.model) {
+          span.setAttribute(SemanticConventions.LLM_MODEL_NAME, json.model);
+        }
+        if (json.usage?.prompt_tokens != null) {
+          span.setAttribute(
+            SemanticConventions.LLM_TOKEN_COUNT_PROMPT,
+            json.usage.prompt_tokens,
+          );
+        }
+        if (json.usage?.completion_tokens != null) {
+          span.setAttribute(
+            SemanticConventions.LLM_TOKEN_COUNT_COMPLETION,
+            json.usage.completion_tokens,
+          );
+        }
+        if (json.usage?.total_tokens != null) {
+          span.setAttribute(
+            SemanticConventions.LLM_TOKEN_COUNT_TOTAL,
+            json.usage.total_tokens,
+          );
+        }
+        if (CAPTURE_PROMPTS) {
+          span.setAttribute(SemanticConventions.OUTPUT_VALUE, out);
+          span.setAttribute(
+            SemanticConventions.OUTPUT_MIME_TYPE,
+            "text/plain",
+          );
+          span.setAttribute(
+            `${SemanticConventions.LLM_OUTPUT_MESSAGES}.0.${SemanticConventions.MESSAGE_ROLE}`,
+            "assistant",
+          );
+          span.setAttribute(
+            `${SemanticConventions.LLM_OUTPUT_MESSAGES}.0.${SemanticConventions.MESSAGE_CONTENT}`,
+            out,
+          );
+        }
+        span.setStatus({ code: SpanStatusCode.OK });
+        return out;
+      } catch (err) {
+        span.recordException(err as Error);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+        throw err;
+      } finally {
+        span.end();
+      }
+    },
+  );
+
+  return { output: content, gather: gatherData };
+}
+
+// Build a TriageReport directly from the gather JSON when the LLM step fails
+// or returns unparseable output. The schema-required fields the gather
+// script produces deterministically (greptile_score, mergeable_state,
+// has_circleci_checks, pr_title/author/number, diff_files) are filled in
+// from `g`; the model-classified fields (pr_related_failures vs unrelated,
+// failure_rationales, prior_signals, scope_drift) are zeroed and a one-line
+// summary explains the LLM step was skipped.
+function _triageReportFromGather(
+  prUrl: string,
+  g: Record<string, unknown>,
+  reason: string,
+): TriageReport {
+  const diffFiles = (g.diff_files as any[] | undefined) ?? [];
+  const filesChanged = diffFiles.length;
+  let additions = 0;
+  let deletions = 0;
+  for (const f of diffFiles) {
+    additions += (f?.additions as number | undefined) ?? 0;
+    deletions += (f?.deletions as number | undefined) ?? 0;
+  }
+  const mergeable = g.mergeable as boolean | null | undefined;
+  const mergeableState = g.mergeable_state as string | undefined;
+  let hasMergeConflicts: boolean | null = null;
+  if (mergeable === false || mergeableState === "dirty") hasMergeConflicts = true;
+  else if (
+    mergeable === true &&
+    (mergeableState === "clean" ||
+      mergeableState === "unstable" ||
+      mergeableState === "has_hooks")
+  )
+    hasMergeConflicts = false;
+
+  const inProgress = (g.in_progress_checks as string[] | undefined) ?? [];
+  const greptileScore = (g.greptile_score as number | null | undefined) ?? null;
+  const hasCircleCi = (g.has_circleci_checks as boolean | undefined) ?? false;
+  const prNum =
+    (g.pr_number as number | undefined) ?? prNumberFromUrl(prUrl) ?? 0;
+
+  // Build a short, user-readable summary describing the diff size + what fell
+  // through. The verbose `reason` string (often a Zod error blob) goes only to
+  // the debug log, never the user-facing card.
+  dbg(`_triageReportFromGather: building fallback (reason=${reason})`);
+  const sizeLine = `${additions + deletions} line(s) across ${filesChanged} file(s) (+${additions}/-${deletions})`;
+  const summary =
+    `Gathered PR data only — the triage LLM step did not produce a valid ` +
+    `report, so failing-check classification and prior-signal reconciliation ` +
+    `were skipped. ${sizeLine}.`;
+  // Defensive cap; sizeLine is short but keep us under the 600 schema bound.
+  const pr_summary = summary.length > 600 ? summary.slice(0, 597) + "…" : summary;
+  return TriageReportSchema.parse({
+    pr_number: prNum,
+    pr_title: (g.pr_title as string | undefined) ?? prUrl,
+    pr_author: (g.pr_author as string | undefined) ?? "",
+    pr_summary,
+    files_changed: filesChanged,
+    additions,
+    deletions,
+    greptile_score: greptileScore,
+    has_circleci_checks: hasCircleCi,
+    has_merge_conflicts: hasMergeConflicts,
+    running_checks: inProgress,
+  });
+}
+
 // --- Core review orchestration ------------------------------------------------
 
 export async function reviewPr(
@@ -1476,34 +1747,119 @@ export async function reviewPr(
   let patternPlainAppend = "";
 
   log(`starting triage for ${prUrl} (pattern review disabled for v0)`);
-  // Run triage only. Pattern review is disabled for the v0 deploy.
+  // Single-shot triage: run the gather script deterministically, then a single
+  // schema-locked LLM call. We used to use a tool-loop agent here, but the
+  // model would routinely freelance ad-hoc `curl` against api.github.com
+  // instead of calling the gather script — losing greptile detection,
+  // policy-meta classification, and the also_failing_on_other_prs signal.
+  // The single-shot path eliminates that whole failure mode (`_triageSingleShot`
+  // above mirrors `_patternSingleShot`).
   await Promise.all([
     (async () => {
       const triageT0 = Date.now();
       try {
-        log("triage: creating session");
-        const session = await newSession(TRIAGE_SYSTEM);
-        log("triage: running gather + analysis");
-        dbg(
-          `reviewPr.triage: about to call runPrompt (session created in ${Date.now() - triageT0}ms)`,
-        );
-        let { output: triageOut, toolTrace: tt } = await runPrompt(
-          session,
-          `Triage this PR: ${prUrl}`,
+        log("triage: running gather + single-shot");
+        const { output: triageOut, gather: gatherData } = await _triageSingleShot(
+          prUrl,
+          log,
         );
         dbg(
-          `reviewPr.triage: runPrompt returned outputLen=${triageOut.length} traceLen=${tt.length} elapsed=${Date.now() - triageT0}ms`,
+          `reviewPr.triage: single-shot returned outputLen=${triageOut.length} elapsed=${Date.now() - triageT0}ms`,
         );
-        triageTrace = tt;
+        // Synthesise a tool trace so the run audit log still shows what ran,
+        // even though there's no SDK-level tool loop in the single-shot path.
+        triageTrace = [
+          {
+            kind: "call",
+            tool: "gather_pr_triage_data",
+            args: { pr_url: prUrl },
+          },
+          {
+            kind: "result",
+            tool: "gather_pr_triage_data",
+            isError: false,
+            preview: `pr_number=${gatherData.pr_number} greptile_score=${gatherData.greptile_score} failing=${(gatherData.failing_check_contexts as unknown[] | undefined)?.length ?? 0} diff_files=${(gatherData.diff_files as unknown[] | undefined)?.length ?? 0}`,
+          },
+          {
+            kind: "call",
+            tool: "triage_llm",
+            args: { model: defaultModelId ?? "<default>" },
+          },
+          {
+            kind: "result",
+            tool: "triage_llm",
+            isError: false,
+            preview: triageOut.length > 240 ? triageOut.slice(0, 240) + "…" : triageOut,
+          },
+        ];
+        // Full output dump — useful when JSON parsing fails so we can see
+        // exactly what the model produced.
+        dbg(
+          `reviewPr.triage: full output=${_previewForDbg(triageOut, 4000)}`,
+        );
         const raw = extractLastJson(triageOut);
-        session.dispose?.();
+        dbg(
+          `reviewPr.triage: extractLastJson -> ${raw ? "ok" : "null"} ${raw ? `keys=${Object.keys(raw as Record<string, unknown>).join(",")}` : ""}`,
+        );
         if (raw) {
-          triage = TriageReportSchema.parse(raw);
-          log("triage: done ✓");
+          // Soft-truncate the two .max()-bounded prose fields. The model
+          // routinely overshoots `pr_summary` on large refactor PRs (the
+          // schema allows 600 chars; on PR #26957 it produced 970), and
+          // losing the entire structured classification because of a 370-
+          // char overflow on a soft prose field would be the wrong trade.
+          // We tag the truncation so it's visible downstream.
+          const r = raw as Record<string, unknown>;
+          if (typeof r.pr_summary === "string" && r.pr_summary.length > 600) {
+            dbg(
+              `reviewPr.triage: soft-truncating pr_summary from ${r.pr_summary.length} → 600`,
+            );
+            r.pr_summary = r.pr_summary.slice(0, 597) + "…";
+          }
+          if (
+            typeof r.scope_drift_reason === "string" &&
+            r.scope_drift_reason.length > 300
+          ) {
+            dbg(
+              `reviewPr.triage: soft-truncating scope_drift_reason from ${r.scope_drift_reason.length} → 300`,
+            );
+            r.scope_drift_reason = r.scope_drift_reason.slice(0, 297) + "…";
+          }
+          try {
+            triage = TriageReportSchema.parse(r);
+            dbg(
+              `reviewPr.triage: parsed greptile_score=${triage.greptile_score} ` +
+                `pr_related_failures=${triage.pr_related_failures.length} ` +
+                `unrelated_failures=${triage.unrelated_failures.length} ` +
+                `prior_signals=${triage.prior_signals.length} ` +
+                `has_merge_conflicts=${triage.has_merge_conflicts}`,
+            );
+            log("triage: done ✓");
+          } catch (parseErr) {
+            // Schema validation failed — likely a missing required field or
+            // a value outside an enum. Fall back to the deterministic builder
+            // so we still surface greptile_score / mergeable / running checks
+            // from the gather data, then append the model output for audit.
+            dbg(
+              `reviewPr.triage: schema parse failed, falling back to gather-only`,
+              parseErr,
+            );
+            triage = _triageReportFromGather(
+              prUrl,
+              gatherData,
+              `schema parse error: ${String(parseErr).slice(0, 200)}`,
+            );
+            triagePlainAppend = triageOut.trim();
+            log("triage: done (schema parse failed; using gather fallback)");
+          }
         } else {
-          triage = triageReportFromPlainOutput(prUrl, triageOut);
+          // Model returned prose with no JSON. Same fallback path.
+          triage = _triageReportFromGather(
+            prUrl,
+            gatherData,
+            "no JSON in model output",
+          );
           triagePlainAppend = triageOut.trim();
-          log("triage: done (plain output)");
+          log("triage: done (no JSON; using gather fallback)");
         }
       } catch (e) {
         triageErr = String(e);

@@ -350,6 +350,14 @@ export async function claimStagingMergeSlot(
   return { claimed: row.inserted_id != null, countToday: row.count_today as number };
 }
 
+export async function isStagingMerged(prNumber: number, repo: string): Promise<boolean> {
+  const { rows } = await pool().query(
+    `SELECT 1 FROM staging_merges WHERE pr_number = $1 AND repo = $2 AND merge_commit_sha IS NOT NULL`,
+    [prNumber, repo],
+  );
+  return rows.length > 0;
+}
+
 export async function listStagingMerges(limit = 100): Promise<Record<string, unknown>[]> {
   const { rows } = await pool().query(
     `SELECT sm.id, sm.pr_number, sm.repo, sm.run_id,

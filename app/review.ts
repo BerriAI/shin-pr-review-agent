@@ -21,6 +21,16 @@ import { z } from "zod";
 import { Sandbox } from "e2b";
 import * as db from "./db.js";
 
+// --- Auto-merge hook ----------------------------------------------------------
+// server.ts registers this at startup. Fires from reviewPr for every READY
+// verdict regardless of source (chat, webhook, backfill, blocked_watch).
+// claimStagingMergeSlot's ON CONFLICT ensures only one attempt wins if both
+// the hook and a caller's own post-review logic try concurrently.
+
+type AutoMergeHook = (prUrl: string, prNumber: number, repo: string, runId: string) => Promise<void>;
+let _autoMergeHook: AutoMergeHook | null = null;
+export function setAutoMergeHook(fn: AutoMergeHook): void { _autoMergeHook = fn; }
+
 const llmTracer = trace.getTracer("pi-pr-review-agent.llm");
 const CAPTURE_PROMPTS = process.env.OTEL_LOG_PROMPTS !== "false";
 
@@ -2152,6 +2162,15 @@ export async function reviewPr(
     .catch((e) => {
       dbg(`reviewPr: insertRun failed`, e);
     });
+
+  if (card.verdict === "READY" && _autoMergeHook && triage?.pr_number) {
+    const repoMatch = prUrl.match(/github\.com\/([^/]+\/[^/]+)\/pull\//);
+    if (repoMatch) {
+      await _autoMergeHook(prUrl, triage.pr_number, repoMatch[1], runId).catch((e) =>
+        dbg(`reviewPr: autoMergeHook error`, e),
+      );
+    }
+  }
 
   dbg(`reviewPr: EXIT runId=${runId} totalElapsed=${Date.now() - t0}ms`);
   return { card: cardText, drilldown, runId, toolTrace: allTrace };

@@ -18,6 +18,7 @@ import {
   initRegistry,
   initSystemPrompts,
   reviewPr,
+  setAutoMergeHook,
   renderCard,
   type TriageCard,
   promptChatSession,
@@ -69,6 +70,18 @@ const BOT_API_KEYS = new Set(
 const SESSION_AUTH = !!(ADMIN_USERNAME && ADMIN_PASSWORD);
 const AUTH_ENABLED = SESSION_AUTH || BOT_API_KEYS.size > 0;
 const SESSION_SECRET = process.env.SESSION_SECRET ?? randomUUID();
+const _WHITELIST_ENTRIES = (process.env.WHITELIST_GITHUB_LOGINS ?? "")
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+function isWhitelistedLogin(login: string): boolean {
+  const l = login.toLowerCase();
+  return _WHITELIST_ENTRIES.some((entry) => {
+    if (!entry.includes("*")) return entry === l;
+    const pattern = entry.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+    return new RegExp(`^${pattern}$`).test(l);
+  });
+}
 
 function bearerToken(req: Request): string | null {
   const h = req.headers.authorization ?? "";
@@ -147,6 +160,7 @@ async function fetchPr(
   updated_at: string;
   head: { sha: string; ref: string };
   base: { ref: string };
+  user: { login: string };
 }> {
   const r = await fetch(
     `https://api.github.com/repos/${repoFullName}/pulls/${prNumber}`,
@@ -166,6 +180,7 @@ async function fetchPr(
     updated_at: string;
     head: { sha: string; ref: string };
     base: { ref: string };
+    user: { login: string };
   }>;
 }
 
@@ -473,6 +488,10 @@ async function runWebhookReview(
     console.log(`[webhook] delivery=${delivery} PR #${prNumber} is draft, skipping`);
     return;
   }
+  if (_WHITELIST_ENTRIES.length && isWhitelistedLogin(pr.user.login)) {
+    console.log(`[webhook] delivery=${delivery} PR #${prNumber} author=${pr.user.login} is whitelisted, skipping`);
+    return;
+  }
 
   const claimed = await db.claimWebhookReview(prNumber, pr.head.sha, repoFullName);
   console.log(
@@ -498,29 +517,8 @@ async function runWebhookReview(
   if (finalVerdict === "BLOCKED") {
     await db.startBlockedWatch(runId);
     console.log(`[webhook] delivery=${delivery} PR #${prNumber} BLOCKED — started 7-day inactivity watch`);
-  } else if (finalVerdict === "READY") {
-    const { claimed: stageClaimed, countToday } = await db.claimStagingMergeSlot(prNumber, repoFullName, DAILY_MERGE_CAP);
-    if (!stageClaimed) {
-      console.log(
-        `[webhook] delivery=${delivery} PR #${prNumber} READY but daily merge cap (${DAILY_MERGE_CAP}) reached (${countToday} today) — skipping auto-merge`,
-      );
-    } else {
-      console.log(
-        `[webhook] delivery=${delivery} PR #${prNumber} READY — auto-merging to staging (${countToday + 1}/${DAILY_MERGE_CAP} today)`,
-      );
-      try {
-        const mergeResult = await mergePrToAgentBranch(token, repoFullName, prNumber, agentBranchName(), reviewCard);
-        await db.updateStagingMergeResult(prNumber, repoFullName, {
-          stagingPrUrl: mergeResult.staging_pr_url,
-          stagingPrNumber: mergeResult.staging_pr_number,
-          mergeCommitSha: mergeResult.merge_commit_sha,
-          runId,
-        });
-      } catch (err) {
-        console.error(`[webhook] delivery=${delivery} auto-stage PR #${prNumber} failed:`, err);
-      }
-    }
   }
+  // READY: auto-merge handled by hook registered in reviewPr (all sources unified).
 }
 
 app.post("/webhook/github", (req, res) => {
@@ -2280,28 +2278,14 @@ async function pollBlockedWatches(): Promise<void> {
           const newVerdict = (finalRun?.card as Record<string, unknown> | null)?.verdict;
 
           if (newVerdict === "READY") {
-            const { claimed, countToday } = await db.claimStagingMergeSlot(prNumber, repoFullName, DAILY_MERGE_CAP);
-            if (!claimed) {
-              console.log(`[blocked-watch] PR #${prNumber} now READY but daily merge cap (${DAILY_MERGE_CAP}) reached (${countToday} today) — resetting watch`);
-              await db.resetBlockedWatch(runId);
+            // Hook inside reviewPr handled the merge. Check DB to decide anchor cleanup.
+            const merged = await db.isStagingMerged(prNumber, repoFullName);
+            if (merged) {
+              console.log(`[blocked-watch] PR #${prNumber} now READY and merged — deleting anchor run ${runId}`);
+              await db.deleteRun(runId);
             } else {
-              console.log(`[blocked-watch] PR #${prNumber} now READY — auto-merging to staging (${countToday + 1}/${DAILY_MERGE_CAP} today)`);
-              const watchReviewCard = finalRun?.card
-                ? renderCard(finalRun.card as unknown as TriageCard)
-                : undefined;
-              try {
-                const mergeResult = await mergePrToAgentBranch(token, repoFullName, prNumber, agentBranchName(), watchReviewCard);
-                await db.updateStagingMergeResult(prNumber, repoFullName, {
-                  stagingPrUrl: mergeResult.staging_pr_url,
-                  stagingPrNumber: mergeResult.staging_pr_number,
-                  mergeCommitSha: mergeResult.merge_commit_sha,
-                  runId: finalRunId,
-                });
-                await db.deleteRun(runId);
-              } catch (mergeErr) {
-                console.error(`[blocked-watch] auto-stage PR #${prNumber} failed:`, mergeErr);
-                await db.resetBlockedWatch(runId);
-              }
+              console.log(`[blocked-watch] PR #${prNumber} now READY but merge pending/capped — resetting watch`);
+              await db.resetBlockedWatch(runId);
             }
           } else {
             console.log(`[blocked-watch] PR #${prNumber} re-reviewed: verdict=${newVerdict} — resetting watch`);
@@ -2344,6 +2328,32 @@ async function pollBlockedWatches(): Promise<void> {
   }
 }
 
+// --- Auto-merge hook ----------------------------------------------------------
+
+async function autoMergeReadyPr(
+  _prUrl: string,
+  prNumber: number,
+  repo: string,
+  runId: string,
+): Promise<void> {
+  const org = repo.split("/")[0];
+  const installationId = await getOrgInstallationId(org);
+  const token = await getInstallationToken(installationId);
+  const { claimed, countToday } = await db.claimStagingMergeSlot(prNumber, repo, DAILY_MERGE_CAP);
+  if (!claimed) {
+    console.log(`[auto-merge] PR #${prNumber} cap reached or already staged (${countToday}/${DAILY_MERGE_CAP} today)`);
+    return;
+  }
+  console.log(`[auto-merge] PR #${prNumber} READY — merging to staging (${countToday + 1}/${DAILY_MERGE_CAP} today)`);
+  const mergeResult = await mergePrToAgentBranch(token, repo, prNumber, agentBranchName());
+  await db.updateStagingMergeResult(prNumber, repo, {
+    stagingPrUrl: mergeResult.staging_pr_url,
+    stagingPrNumber: mergeResult.staging_pr_number,
+    mergeCommitSha: mergeResult.merge_commit_sha,
+    runId,
+  });
+}
+
 // --- Startup ------------------------------------------------------------------
 
 const PORT = Number(process.env.PORT) || 8081;
@@ -2351,6 +2361,7 @@ const PORT = Number(process.env.PORT) || 8081;
 await db.initDb();
 await initRegistry();
 initSystemPrompts();
+setAutoMergeHook(autoMergeReadyPr);
 
 // Poll every 6 hours for BLOCKED PRs with no activity after 7 days.
 const BLOCKED_WATCH_INTERVAL_MS = 6 * 60 * 60 * 1000;

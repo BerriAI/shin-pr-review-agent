@@ -339,26 +339,16 @@ function escapeHtml(s){
 }
 
 function unwrapPreview(preview){
-  if (!preview) return { text: '', truncated: false };
-  // Preview = first 240 chars of JSON.stringify({"content":[{"type":"text","text":"..."}]})
-  // Try complete match first (closing quote present)
+  if (!preview) return { text: '' };
+  // Try to extract text field from JSON.stringify({"content":[{"type":"text","text":"..."}]})
   const full = preview.match(/"text":"((?:[^"\\]|\\.)*)"/);
   if (full) {
     let text;
     try { text = JSON.parse('"' + full[1] + '"'); }
     catch { text = full[1].replace(/\\n/g,'\n').replace(/\\t/g,'\t').replace(/\\"/g,'"').replace(/\\\\/g,'\\'); }
-    return { text, truncated: preview.length >= 238 };
+    return { text };
   }
-  // Partial match — truncated before closing quote
-  const partial = preview.match(/"text":"((?:[^"\\]|\\.)*)/);
-  if (partial) {
-    const raw = partial[1];
-    let text;
-    try { text = JSON.parse('"' + raw + '"'); }
-    catch { text = raw.replace(/\\n/g,'\n').replace(/\\t/g,'\t').replace(/\\"/g,'"').replace(/\\\\/g,'\\'); }
-    return { text: text + '…', truncated: true };
-  }
-  return { text: preview, truncated: preview.length >= 238 };
+  return { text: preview };
 }
 
 function renderTrace(trace){
@@ -375,7 +365,7 @@ function renderTrace(trace){
         <pre class="trace-cmd">${escapeHtml(cmd)}</pre>
       </div>`;
     } else {
-      const { text, truncated } = unwrapPreview(t.preview || '');
+      const { text } = unwrapPreview(t.preview || '');
       const errClass = t.isError ? ' trace-error' : '';
       return `<div class="trace-entry trace-entry-result${errClass}">
         <div class="trace-header">
@@ -385,7 +375,6 @@ function renderTrace(trace){
         </div>
         ${t.isError ? '<div class="trace-err-badge">⚠ error</div>' : ''}
         <pre class="trace-out-text">${escapeHtml(text)}</pre>
-        ${truncated ? '<div class="trace-truncated">⚠ preview truncated at 240 chars — full output not stored</div>' : ''}
       </div>`;
     }
   }).join('');
@@ -551,6 +540,7 @@ function buildDebugDump(rec){
   lines.push('Reviewed: ' + fmtTime(rec.ts));
   lines.push('Duration: ' + fmtDuration(rec.duration_s));
   lines.push('Source:   ' + (rec.source || ''));
+  lines.push('LiteLLM session_id: ' + rec.run_id);
   lines.push('');
   lines.push('=== VERDICT ===');
   lines.push((card.emoji || '') + ' ' + card.score + '/5 ' + (card.verdict || ''));

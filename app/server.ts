@@ -429,6 +429,68 @@ if (SESSION_AUTH) {
 
 const DAILY_MERGE_CAP = 10;
 
+// --- Slack daily merge summary ------------------------------------------------
+// Set SLACK_WEBHOOK_URL to an Incoming Webhook URL from your Slack app to enable.
+// Get one at: https://api.slack.com/messaging/webhooks
+// SLACK_DAILY_SUMMARY_HOUR_UTC controls when the summary fires (0–23, default 17 = 5 PM UTC).
+
+const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL ?? "";
+const SLACK_DAILY_SUMMARY_HOUR_UTC = Number(process.env.SLACK_DAILY_SUMMARY_HOUR_UTC ?? 17);
+
+async function postSlackDailySummary(dateLabel: string): Promise<void> {
+  if (!SLACK_WEBHOOK_URL) return;
+  const merges = await db.listTodaysMerges();
+  const prLines = merges.map((m) => {
+    const prHref = m.pr_url ?? `https://github.com/${m.repo}/pull/${m.pr_number}`;
+    const title = m.pr_title ?? `PR #${m.pr_number}`;
+    const author = m.pr_author ? ` by @${m.pr_author}` : "";
+    const staging = m.staging_pr_url
+      ? ` → <${m.staging_pr_url}|staging #${m.staging_pr_number}>`
+      : "";
+    return `• <${prHref}|${title}>${author}${staging}`;
+  });
+
+  const blocks = [
+    {
+      type: "header",
+      text: { type: "plain_text", text: `🤖 Agent Merge Summary — ${dateLabel}`, emoji: true },
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text:
+          merges.length === 0
+            ? "No PRs merged today."
+            : `*${merges.length} PR${merges.length === 1 ? "" : "s"} merged to staging:*\n${prLines.join("\n")}`,
+      },
+    },
+  ];
+
+  const resp = await fetch(SLACK_WEBHOOK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ blocks }),
+  });
+  if (!resp.ok) {
+    console.warn(`[slack] daily summary post failed: ${resp.status} ${await resp.text()}`);
+  } else {
+    console.log(`[slack] daily summary posted — ${merges.length} merges for ${dateLabel}`);
+  }
+}
+
+let _lastSummaryDate = "";
+
+async function maybePostDailySummary(): Promise<void> {
+  if (!SLACK_WEBHOOK_URL) return;
+  const now = new Date();
+  if (now.getUTCHours() < SLACK_DAILY_SUMMARY_HOUR_UTC) return;
+  const todayUtc = now.toISOString().slice(0, 10);
+  if (_lastSummaryDate === todayUtc) return;
+  _lastSummaryDate = todayUtc;
+  await postSlackDailySummary(todayUtc);
+}
+
 // --- GitHub webhook -----------------------------------------------------------
 
 // In-memory signal: Greptile has commented for a given (repo, prNumber, sha).
@@ -1039,6 +1101,30 @@ app.get("/runs/api/runs/:id/annotations", requireLogin, async (req, res) => {
   }
 });
 
+app.get("/runs/api/runs/:id/llm-logs", requireLogin, async (req, res) => {
+  const base = process.env.LITELLM_API_BASE?.replace(/\/+$/, "");
+  const key = process.env.LITELLM_API_KEY;
+  if (!base || !key)
+    return res
+      .status(503)
+      .json({ error: "LITELLM_API_BASE or LITELLM_API_KEY not configured" });
+  try {
+    const r = await fetch(
+      `${base}/spend/logs?session_id=${encodeURIComponent(req.params.id)}`,
+      { headers: { Authorization: `Bearer ${key}` } },
+    );
+    if (!r.ok) {
+      const txt = await r.text();
+      return res
+        .status(r.status)
+        .json({ error: `LiteLLM error ${r.status}: ${txt.slice(0, 300)}` });
+    }
+    res.json(await r.json());
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 app.post("/runs/api/runs/:id/graduate", requireLogin, async (req, res) => {
   const setName = (req.query.set_name as string) ?? "graduated";
   try {
@@ -1453,6 +1539,19 @@ app.get("/api/v1/auto-merges", requireLogin, async (req, res) => {
   const limit = Math.min(parseInt(String(req.query.limit ?? "100"), 10) || 100, 500);
   try {
     res.json(await db.listStagingMerges(limit));
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/v1/slack/daily-summary — manually fire today's merge summary to Slack.
+// Useful for testing or triggering outside the scheduled window.
+app.post("/api/v1/slack/daily-summary", requireLogin, async (_req, res) => {
+  if (!SLACK_WEBHOOK_URL) return res.status(400).json({ error: "SLACK_WEBHOOK_URL not configured" });
+  const dateLabel = new Date().toISOString().slice(0, 10);
+  try {
+    await postSlackDailySummary(dateLabel);
+    res.json({ ok: true, date: dateLabel });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -2366,6 +2465,9 @@ setAutoMergeHook(autoMergeReadyPr);
 const BLOCKED_WATCH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 setInterval(() => { pollBlockedWatches().catch(console.error); }, BLOCKED_WATCH_INTERVAL_MS);
 pollBlockedWatches().catch(console.error);
+
+// Check every minute whether it's time to post the Slack daily merge summary.
+setInterval(() => { maybePostDailySummary().catch(console.error); }, 60_000);
 
 app.listen(PORT, () => {
   console.log(`listening on http://localhost:${PORT}`);

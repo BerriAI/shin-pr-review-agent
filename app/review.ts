@@ -235,7 +235,7 @@ export async function runPrompt(
       pending.delete(id);
       const raw = event.result ?? event.output ?? event.error ?? "";
       const s = typeof raw === "string" ? raw : JSON.stringify(raw);
-      const preview = s.length > 240 ? s.slice(0, 240) + "…" : s;
+      const preview = s;
       dbg(
         `runPrompt[${promptId}]: tool_execution_end tool=${name} isError=${!!event.isError} resultLen=${s.length} resultPreview=${_previewForDbg(s, 800)}`,
       );
@@ -1513,6 +1513,7 @@ function _buildPatternPrompt(
 async function _patternSingleShot(
   prUrl: string,
   log: (m: string) => void,
+  runId: string,
 ): Promise<string> {
   const gatherData = await _runGatherLocal(
     prUrl,
@@ -1540,7 +1541,7 @@ async function _patternSingleShot(
       { role: "system", content: PATTERN_SYSTEM_SINGLE_SHOT },
       { role: "user", content: userPrompt },
     ];
-    const requestBody = { model, max_tokens: 4096, messages };
+    const requestBody = { model, max_tokens: 4096, messages, metadata: { session_id: runId, trace_id: runId, tags: ["pr-review", "pattern"] } };
 
     span.setAttributes({
       [SemanticConventions.OPENINFERENCE_SPAN_KIND]: OpenInferenceSpanKind.LLM,
@@ -1552,6 +1553,7 @@ async function _patternSingleShot(
       }),
       "pr.url": prUrl,
       "pr.review.kind": "pattern_single_shot",
+      "run.id": runId,
     });
     if (CAPTURE_PROMPTS) {
       span.setAttribute(
@@ -1679,6 +1681,7 @@ function _buildTriagePrompt(
 async function _triageSingleShot(
   prUrl: string,
   log: (m: string) => void,
+  runId: string,
 ): Promise<{ output: string; gather: Record<string, unknown> }> {
   const gatherData = await _runGatherLocal(prUrl, log, GATHER_SCRIPT, "triage");
   const userPrompt = _buildTriagePrompt(prUrl, gatherData);
@@ -1708,7 +1711,7 @@ async function _triageSingleShot(
         { role: "system", content: TRIAGE_SYSTEM_SINGLE_SHOT },
         { role: "user", content: userPrompt },
       ];
-      const requestBody = { model, max_tokens: 4096, messages };
+      const requestBody = { model, max_tokens: 4096, messages, metadata: { session_id: runId, trace_id: runId, tags: ["pr-review", "triage"] } };
 
       span.setAttributes({
         [SemanticConventions.OPENINFERENCE_SPAN_KIND]:
@@ -1721,6 +1724,7 @@ async function _triageSingleShot(
         }),
         "pr.url": prUrl,
         "pr.review.kind": "triage_single_shot",
+        "run.id": runId,
       });
       if (CAPTURE_PROMPTS) {
         span.setAttribute(
@@ -1945,6 +1949,7 @@ export async function reviewPr(
         const { output: triageOut, gather: gatherData } = await _triageSingleShot(
           prUrl,
           log,
+          runId,
         );
         dbg(
           `reviewPr.triage: single-shot returned outputLen=${triageOut.length} elapsed=${Date.now() - triageT0}ms`,
@@ -1972,7 +1977,7 @@ export async function reviewPr(
             kind: "result",
             tool: "triage_llm",
             isError: false,
-            preview: triageOut.length > 240 ? triageOut.slice(0, 240) + "…" : triageOut,
+            preview: triageOut,
           },
         ];
         // Full output dump — useful when JSON parsing fails so we can see
@@ -2054,7 +2059,7 @@ export async function reviewPr(
     // (async () => {
     //   try {
     //     const t0pat = Date.now();
-    //     const patternOut = await _patternSingleShot(prUrl, log);
+    //     const patternOut = await _patternSingleShot(prUrl, log, runId);
     //     const raw = extractLastJson(patternOut);
     //     if (raw) {
     //       pattern = PatternReportSchema.parse(raw);

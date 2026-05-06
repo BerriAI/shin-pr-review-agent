@@ -373,6 +373,33 @@ export async function listStagingMerges(limit = 100): Promise<Record<string, unk
   return rows;
 }
 
+export interface TodayMerge {
+  pr_number: number;
+  repo: string;
+  staging_pr_url: string | null;
+  staging_pr_number: number | null;
+  merge_commit_sha: string | null;
+  merged_at: Date;
+  pr_title: string | null;
+  pr_author: string | null;
+  pr_url: string | null;
+}
+
+export async function listTodaysMerges(): Promise<TodayMerge[]> {
+  const { rows } = await pool().query(
+    `SELECT sm.pr_number, sm.repo,
+            sm.staging_pr_url, sm.staging_pr_number, sm.merge_commit_sha,
+            sm.merged_at,
+            r.pr_title, r.pr_author, r.pr_url
+     FROM staging_merges sm
+     LEFT JOIN runs r ON sm.run_id = r.run_id
+     WHERE sm.merged_at >= (CURRENT_DATE AT TIME ZONE 'UTC')
+       AND sm.merged_at <  (CURRENT_DATE AT TIME ZONE 'UTC' + INTERVAL '1 day')
+     ORDER BY sm.merged_at ASC`,
+  );
+  return rows as TodayMerge[];
+}
+
 // Fill in merge results after the GitHub merge API call succeeds.
 export async function updateStagingMergeResult(
   prNumber: number,

@@ -1,0 +1,1 @@
+ALTER TABLE staging_merges ADD COLUMN IF NOT EXISTS reverted_at TIMESTAMPTZ;

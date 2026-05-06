@@ -352,10 +352,51 @@ export async function claimStagingMergeSlot(
 
 export async function isStagingMerged(prNumber: number, repo: string): Promise<boolean> {
   const { rows } = await pool().query(
-    `SELECT 1 FROM staging_merges WHERE pr_number = $1 AND repo = $2 AND merge_commit_sha IS NOT NULL`,
+    `SELECT 1 FROM staging_merges WHERE pr_number = $1 AND repo = $2 AND merge_commit_sha IS NOT NULL AND reverted_at IS NULL`,
     [prNumber, repo],
   );
   return rows.length > 0;
+}
+
+export async function getStagingMergeInfo(
+  prNumber: number,
+  repo: string,
+): Promise<{ is_staged: boolean; staging_pr_url: string | null; staging_pr_number: number | null } | null> {
+  const { rows } = await pool().query(
+    `SELECT merge_commit_sha, staging_pr_url, staging_pr_number, reverted_at
+     FROM staging_merges WHERE pr_number = $1 AND repo = $2`,
+    [prNumber, repo],
+  );
+  if (!rows.length) return null;
+  const r = rows[0];
+  return {
+    is_staged: r.merge_commit_sha != null && r.reverted_at == null,
+    staging_pr_url: r.staging_pr_url ?? null,
+    staging_pr_number: r.staging_pr_number ?? null,
+  };
+}
+
+export async function markStagingMergeReverted(prNumber: number, repo: string): Promise<boolean> {
+  const { rowCount } = await pool().query(
+    `UPDATE staging_merges SET reverted_at = NOW()
+     WHERE pr_number = $1 AND repo = $2 AND reverted_at IS NULL AND merge_commit_sha IS NOT NULL`,
+    [prNumber, repo],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+export async function listTodayStagingMergesForRebuild(repo: string): Promise<{ pr_number: number }[]> {
+  const { rows } = await pool().query(
+    `SELECT pr_number FROM staging_merges
+     WHERE repo = $1
+       AND reverted_at IS NULL
+       AND merge_commit_sha IS NOT NULL
+       AND merged_at >= (CURRENT_DATE AT TIME ZONE 'UTC')
+       AND merged_at <  (CURRENT_DATE AT TIME ZONE 'UTC' + INTERVAL '1 day')
+     ORDER BY merged_at ASC`,
+    [repo],
+  );
+  return rows as { pr_number: number }[];
 }
 
 export async function listStagingMerges(limit = 100): Promise<Record<string, unknown>[]> {
@@ -363,6 +404,7 @@ export async function listStagingMerges(limit = 100): Promise<Record<string, unk
     `SELECT sm.id, sm.pr_number, sm.repo, sm.run_id,
             sm.staging_pr_url, sm.staging_pr_number, sm.merge_commit_sha,
             EXTRACT(EPOCH FROM sm.merged_at)::float8 AS merged_at_epoch,
+            EXTRACT(EPOCH FROM sm.reverted_at)::float8 AS reverted_at_epoch,
             r.pr_title, r.pr_author
      FROM staging_merges sm
      LEFT JOIN runs r ON sm.run_id = r.run_id
@@ -373,32 +415,6 @@ export async function listStagingMerges(limit = 100): Promise<Record<string, unk
   return rows;
 }
 
-export interface TodayMerge {
-  pr_number: number;
-  repo: string;
-  staging_pr_url: string | null;
-  staging_pr_number: number | null;
-  merge_commit_sha: string | null;
-  merged_at: Date;
-  pr_title: string | null;
-  pr_author: string | null;
-  pr_url: string | null;
-}
-
-export async function listTodaysMerges(): Promise<TodayMerge[]> {
-  const { rows } = await pool().query(
-    `SELECT sm.pr_number, sm.repo,
-            sm.staging_pr_url, sm.staging_pr_number, sm.merge_commit_sha,
-            sm.merged_at,
-            r.pr_title, r.pr_author, r.pr_url
-     FROM staging_merges sm
-     LEFT JOIN runs r ON sm.run_id = r.run_id
-     WHERE sm.merged_at >= (CURRENT_DATE AT TIME ZONE 'UTC')
-       AND sm.merged_at <  (CURRENT_DATE AT TIME ZONE 'UTC' + INTERVAL '1 day')
-     ORDER BY sm.merged_at ASC`,
-  );
-  return rows as TodayMerge[];
-}
 
 // Fill in merge results after the GitHub merge API call succeeds.
 export async function updateStagingMergeResult(

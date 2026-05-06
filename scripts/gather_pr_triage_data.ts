@@ -31,7 +31,17 @@ const _FAILURE_MARKERS: RegExp[] = [
   /(?<!\S)Error:/g,
   /(?<!\S)error:/g,
 ];
-const _GREPTILE_LOGIN_RE = /greptile/i;
+// Real Greptile bot account on GitHub. Confirmed against
+// https://github.com/BerriAI/litellm/pull/27256 — the bot user has
+// login="greptile-apps[bot]" and type="Bot". We require BOTH to match so
+// an attacker cannot register a normal account whose name happens to
+// contain "greptile" and spoof a high score in their own PR.
+export const GREPTILE_BOT_LOGIN = "greptile-apps[bot]";
+export function isGreptileBotUser(u: unknown): boolean {
+  if (!u || typeof u !== "object") return false;
+  const obj = u as { login?: unknown; type?: unknown };
+  return obj.login === GREPTILE_BOT_LOGIN && obj.type === "Bot";
+}
 const _GREPTILE_SCORE_RE = /confidence\s*score[^0-9]{0,10}([1-5])\s*\/\s*5/i;
 const _GREPTILE_SCORE_FALLBACK_RE = /\b([1-5])\s*\/\s*5\b/;
 const _CIRCLECI_NAME_RE = /(^|\/)circleci(\s*[:/]|\b)/i;
@@ -511,14 +521,12 @@ async function _fetchGreptileScore(
 
   const candidates: Array<[string, string]> = [];
   for (const r of reviews ?? []) {
-    const login = r?.user?.login ?? "";
-    if (_GREPTILE_LOGIN_RE.test(login)) {
+    if (isGreptileBotUser(r?.user)) {
       candidates.push([r.submitted_at ?? "", r.body ?? ""]);
     }
   }
   for (const c of comments ?? []) {
-    const login = c?.user?.login ?? "";
-    if (_GREPTILE_LOGIN_RE.test(login)) {
+    if (isGreptileBotUser(c?.user)) {
       candidates.push([c.created_at ?? "", c.body ?? ""]);
     }
   }
@@ -726,7 +734,20 @@ async function main(): Promise<void> {
   process.stdout.write("\n");
 }
 
-main().catch((e) => {
-  process.stderr.write(`error: ${(e as Error).message}\n`);
-  process.exit(1);
-});
+// Only auto-run main() when this file is the entry point — guards against
+// importers (e.g. smoke tests, helpers) triggering a CLI usage exit.
+const _isEntryPoint = (() => {
+  try {
+    const argv1 = process.argv[1];
+    if (!argv1) return false;
+    return import.meta.url === new URL(`file://${argv1}`).href;
+  } catch {
+    return false;
+  }
+})();
+if (_isEntryPoint) {
+  main().catch((e) => {
+    process.stderr.write(`error: ${(e as Error).message}\n`);
+    process.exit(1);
+  });
+}

@@ -14,6 +14,7 @@ import express, {
 } from "express";
 import session from "express-session";
 import * as db from "./db.js";
+import { isFirstTimeAuthor } from "./automerge_guards.js";
 import {
   initRegistry,
   initSystemPrompts,
@@ -156,9 +157,10 @@ async function fetchPr(
   draft: boolean;
   state: string;
   updated_at: string;
+  title: string;
   head: { sha: string; ref: string };
   base: { ref: string };
-  user: { login: string };
+  user: { login: string; type?: string };
 }> {
   const r = await fetch(
     `https://api.github.com/repos/${repoFullName}/pulls/${prNumber}`,
@@ -176,9 +178,10 @@ async function fetchPr(
     draft: boolean;
     state: string;
     updated_at: string;
+    title: string;
     head: { sha: string; ref: string };
     base: { ref: string };
-    user: { login: string };
+    user: { login: string; type?: string };
   }>;
 }
 
@@ -299,51 +302,75 @@ async function mergePrToAgentBranch(
     fetchPr(token, repoFullName, prNumber),
     getDefaultBranch(token, repoFullName),
   ]);
-  await ensureBranch(token, repoFullName, agentBranch, pr.base.ref);
-  const mergeR = await fetch(
-    `https://api.github.com/repos/${repoFullName}/merges`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        base: agentBranch,
-        head: pr.head.sha,
-        commit_message: `Merge PR #${prNumber} into agent staging branch`,
-      }),
-    },
-  );
-  if (!mergeR.ok && mergeR.status !== 204)
-    throw new Error(`merge failed: ${mergeR.status} ${await mergeR.text()}`);
-  const merge_commit_sha = mergeR.status === 204
-    ? pr.head.sha
-    : ((await mergeR.json()) as { sha: string }).sha;
-  const stagingPr = await ensureStagingPr(token, repoFullName, agentBranch, defaultBranch);
+  if (pr.state !== "open") {
+    throw new Error(`PR #${prNumber} is not open (state=${pr.state}), skipping merge`);
+  }
+  const originalBase = pr.base.ref;
+  await ensureBranch(token, repoFullName, agentBranch, originalBase);
 
-  // Comment then close the original PR — POST /merges doesn't auto-close it
-  const ghCloseHeaders = {
+  const ghHeaders = {
     Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
     "Content-Type": "application/json",
   };
+
+  // Point PR at the staging branch so GitHub's squash merge targets it.
+  const rebaseR = await fetch(
+    `https://api.github.com/repos/${repoFullName}/pulls/${prNumber}`,
+    {
+      method: "PATCH",
+      headers: ghHeaders,
+      body: JSON.stringify({ base: agentBranch }),
+    },
+  );
+  if (!rebaseR.ok) throw new Error(`base change failed: ${rebaseR.status} ${await rebaseR.text()}`);
+
+  // Squash merge — GitHub auto-closes the PR on success.
+  const mergeR = await fetch(
+    `https://api.github.com/repos/${repoFullName}/pulls/${prNumber}/merge`,
+    {
+      method: "PUT",
+      headers: ghHeaders,
+      body: JSON.stringify({
+        merge_method: "squash",
+        commit_title: `${pr.title} (#${prNumber})`,
+        commit_message: `Squash-merged by litellm-agent from ${pr.user.login}'s PR.`,
+      }),
+    },
+  );
+  if (!mergeR.ok) {
+    // Conflict or other failure — revert the base change so the PR is left clean.
+    await fetch(
+      `https://api.github.com/repos/${repoFullName}/pulls/${prNumber}`,
+      {
+        method: "PATCH",
+        headers: ghHeaders,
+        body: JSON.stringify({ base: originalBase }),
+      },
+    ).catch((e) => console.warn(`[merge] base revert failed for PR #${prNumber}:`, e));
+    throw new Error(`squash merge failed: ${mergeR.status} ${await mergeR.text()}`);
+  }
+  const merge_commit_sha = ((await mergeR.json()) as { sha: string }).sha;
+
+  const stagingPr = await ensureStagingPr(token, repoFullName, agentBranch, defaultBranch);
+
+  // PR is already closed by GitHub — just leave a comment with the staging link.
   const mergeComment = reviewCard
-    ? `🤖 **litellm-agent**: Merged into staging branch \`${agentBranch}\`. Staging PR: ${stagingPr.html_url}\n\n---\n\n${reviewCard}`
-    : `🤖 **litellm-agent**: Merged into staging branch \`${agentBranch}\`. Staging PR: ${stagingPr.html_url}`;
+    ? `🤖 **litellm-agent**: Squash-merged into staging branch \`${agentBranch}\`. Staging PR: ${stagingPr.html_url}\n\n---\n\n${reviewCard}`
+    : `🤖 **litellm-agent**: Squash-merged into staging branch \`${agentBranch}\`. Staging PR: ${stagingPr.html_url}`;
   await fetch(`https://api.github.com/repos/${repoFullName}/issues/${prNumber}/comments`, {
     method: "POST",
-    headers: ghCloseHeaders,
+    headers: ghHeaders,
     body: JSON.stringify({ body: mergeComment }),
   }).catch((err) => console.warn(`[merge] comment on PR #${prNumber} failed:`, err));
-  await fetch(`https://api.github.com/repos/${repoFullName}/pulls/${prNumber}`, {
-    method: "PATCH",
-    headers: ghCloseHeaders,
-    body: JSON.stringify({ state: "closed" }),
-  }).catch((err) => console.warn(`[merge] close PR #${prNumber} failed:`, err));
+
+  // Trigger Greptile review on the staging PR after each merge.
+  await fetch(`https://api.github.com/repos/${repoFullName}/issues/${stagingPr.number}/comments`, {
+    method: "POST",
+    headers: ghHeaders,
+    body: JSON.stringify({ body: "@greptile please review" }),
+  }).catch((err) => console.warn(`[merge] greptile trigger on staging PR #${stagingPr.number} failed:`, err));
 
   return {
     merge_commit_sha,
@@ -351,6 +378,54 @@ async function mergePrToAgentBranch(
     staging_pr_url: stagingPr.html_url,
     staging_pr_number: stagingPr.number,
   };
+}
+
+async function rebuildStagingBranch(
+  token: string,
+  repo: string,
+  stagingBranch: string,
+): Promise<{ mergesReplayed: number }> {
+  const ghHeaders = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  const remaining = await db.listTodayStagingMergesForRebuild(repo);
+  const defaultBranch = await getDefaultBranch(token, repo);
+  const refR = await fetch(
+    `https://api.github.com/repos/${repo}/git/refs/heads/${defaultBranch}`,
+    { headers: ghHeaders },
+  );
+  if (!refR.ok) throw new Error(`ref fetch failed: ${refR.status}`);
+  const { object: { sha: mainSha } } = await refR.json() as { object: { sha: string } };
+
+  // Reset staging branch to main HEAD (force-overwrite)
+  const patchR = await fetch(
+    `https://api.github.com/repos/${repo}/git/refs/heads/${stagingBranch}`,
+    {
+      method: "PATCH",
+      headers: { ...ghHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ sha: mainSha, force: true }),
+    },
+  );
+  if (!patchR.ok) throw new Error(`branch reset failed: ${patchR.status} ${await patchR.text()}`);
+
+  for (const merge of remaining) {
+    const pr = await fetchPr(token, repo, merge.pr_number);
+    const mergeR = await fetch(`https://api.github.com/repos/${repo}/merges`, {
+      method: "POST",
+      headers: { ...ghHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        base: stagingBranch,
+        head: pr.head.sha,
+        commit_message: `Merge PR #${merge.pr_number} into agent staging branch`,
+      }),
+    });
+    if (!mergeR.ok && mergeR.status !== 204)
+      throw new Error(`re-merge PR #${merge.pr_number} failed: ${mergeR.status} ${await mergeR.text()}`);
+  }
+
+  return { mergesReplayed: remaining.length };
 }
 
 async function getOrgInstallationId(org: string): Promise<number> {
@@ -428,68 +503,6 @@ if (SESSION_AUTH) {
 // --- Daily auto-merge cap -----------------------------------------------------
 
 const DAILY_MERGE_CAP = 10;
-
-// --- Slack daily merge summary ------------------------------------------------
-// Set SLACK_WEBHOOK_URL to an Incoming Webhook URL from your Slack app to enable.
-// Get one at: https://api.slack.com/messaging/webhooks
-// SLACK_DAILY_SUMMARY_HOUR_UTC controls when the summary fires (0–23, default 17 = 5 PM UTC).
-
-const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL ?? "";
-const SLACK_DAILY_SUMMARY_HOUR_UTC = Number(process.env.SLACK_DAILY_SUMMARY_HOUR_UTC ?? 17);
-
-async function postSlackDailySummary(dateLabel: string): Promise<void> {
-  if (!SLACK_WEBHOOK_URL) return;
-  const merges = await db.listTodaysMerges();
-  const prLines = merges.map((m) => {
-    const prHref = m.pr_url ?? `https://github.com/${m.repo}/pull/${m.pr_number}`;
-    const title = m.pr_title ?? `PR #${m.pr_number}`;
-    const author = m.pr_author ? ` by @${m.pr_author}` : "";
-    const staging = m.staging_pr_url
-      ? ` → <${m.staging_pr_url}|staging #${m.staging_pr_number}>`
-      : "";
-    return `• <${prHref}|${title}>${author}${staging}`;
-  });
-
-  const blocks = [
-    {
-      type: "header",
-      text: { type: "plain_text", text: `🤖 Agent Merge Summary — ${dateLabel}`, emoji: true },
-    },
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text:
-          merges.length === 0
-            ? "No PRs merged today."
-            : `*${merges.length} PR${merges.length === 1 ? "" : "s"} merged to staging:*\n${prLines.join("\n")}`,
-      },
-    },
-  ];
-
-  const resp = await fetch(SLACK_WEBHOOK_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ blocks }),
-  });
-  if (!resp.ok) {
-    console.warn(`[slack] daily summary post failed: ${resp.status} ${await resp.text()}`);
-  } else {
-    console.log(`[slack] daily summary posted — ${merges.length} merges for ${dateLabel}`);
-  }
-}
-
-let _lastSummaryDate = "";
-
-async function maybePostDailySummary(): Promise<void> {
-  if (!SLACK_WEBHOOK_URL) return;
-  const now = new Date();
-  if (now.getUTCHours() < SLACK_DAILY_SUMMARY_HOUR_UTC) return;
-  const todayUtc = now.toISOString().slice(0, 10);
-  if (_lastSummaryDate === todayUtc) return;
-  _lastSummaryDate = todayUtc;
-  await postSlackDailySummary(todayUtc);
-}
 
 // --- GitHub webhook -----------------------------------------------------------
 
@@ -1053,11 +1066,21 @@ app.get("/runs/api/runs/:id", requireLogin, async (req, res) => {
     const row = await db.getRun(req.params.id);
     if (!row) return res.status(404).json({ error: "run not found" });
     const msgs = (row.messages as any) ?? {};
+    let stagingInfo: { is_staged: boolean; staging_pr_url: string | null; staging_pr_number: number | null } | null = null;
+    if (row.pr_number && row.pr_url) {
+      const repoMatch = String(row.pr_url).match(/github\.com\/([^/]+\/[^/]+)\/pull\//);
+      if (repoMatch) {
+        stagingInfo = await db.getStagingMergeInfo(row.pr_number as number, repoMatch[1]).catch(() => null);
+      }
+    }
     res.json({
       ...row,
       pr_title: row.pr_title || row.pr_url,
       pr_author: row.pr_author || "",
       messages: { triage: msgs.triage ?? [], pattern: msgs.pattern ?? [] },
+      is_staged: stagingInfo?.is_staged ?? false,
+      staging_pr_url: stagingInfo?.staging_pr_url ?? null,
+      staging_pr_number: stagingInfo?.staging_pr_number ?? null,
     });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -1544,19 +1567,6 @@ app.get("/api/v1/auto-merges", requireLogin, async (req, res) => {
   }
 });
 
-// POST /api/v1/slack/daily-summary — manually fire today's merge summary to Slack.
-// Useful for testing or triggering outside the scheduled window.
-app.post("/api/v1/slack/daily-summary", requireLogin, async (_req, res) => {
-  if (!SLACK_WEBHOOK_URL) return res.status(400).json({ error: "SLACK_WEBHOOK_URL not configured" });
-  const dateLabel = new Date().toISOString().slice(0, 10);
-  try {
-    await postSlackDailySummary(dateLabel);
-    res.json({ ok: true, date: dateLabel });
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
-
 // --- Merge PR to agent staging branch -----------------------------------------
 
 app.post("/api/v1/prs/:number/merge-to-agent-branch", requireLogin, async (req, res) => {
@@ -1578,6 +1588,50 @@ app.post("/api/v1/prs/:number/merge-to-agent-branch", requireLogin, async (req, 
   try {
     const result = await mergePrToAgentBranch(token, repo, prNumber, branch);
     res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.delete("/api/v1/prs/:number/staging-merge", requireLogin, async (req, res) => {
+  const prNumber = parseInt(req.params.number, 10);
+  const repo = req.query.repo as string;
+  if (!repo || isNaN(prNumber))
+    return res.status(400).json({ error: "repo query param and numeric PR number required" });
+
+  const org = repo.split("/")[0];
+  let token: string;
+  try {
+    const installationId = await getOrgInstallationId(org);
+    token = await getInstallationToken(installationId);
+  } catch (err) {
+    return res.status(500).json({ error: `auth failed: ${err}` });
+  }
+
+  const reverted = await db.markStagingMergeReverted(prNumber, repo);
+  if (!reverted)
+    return res.status(404).json({ error: "no active staging merge found for this PR" });
+
+  const branch = agentBranchName();
+  try {
+    const rebuildResult = await rebuildStagingBranch(token, repo, branch);
+    const ghHeaders = {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    };
+    await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}`, {
+      method: "PATCH",
+      headers: ghHeaders,
+      body: JSON.stringify({ state: "open" }),
+    }).catch((err) => console.warn(`[revert] reopen PR #${prNumber} failed:`, err));
+    await fetch(`https://api.github.com/repos/${repo}/issues/${prNumber}/comments`, {
+      method: "POST",
+      headers: ghHeaders,
+      body: JSON.stringify({ body: `🤖 **litellm-agent**: Reverted from staging branch \`${branch}\`. PR reopened for re-review.` }),
+    }).catch((err) => console.warn(`[revert] comment on PR #${prNumber} failed:`, err));
+    res.json({ ok: true, mergesReplayed: rebuildResult.mergesReplayed });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -2427,6 +2481,9 @@ async function pollBlockedWatches(): Promise<void> {
 
 // --- Auto-merge hook ----------------------------------------------------------
 
+// isFirstTimeAuthor lives in app/automerge_guards.ts so smoke tests can
+// import it without dragging in server.ts's top-level DB init / app.listen.
+
 async function autoMergeReadyPr(
   _prUrl: string,
   prNumber: number,
@@ -2437,6 +2494,21 @@ async function autoMergeReadyPr(
   const org = repo.split("/")[0];
   const installationId = await getOrgInstallationId(org);
   const token = await getInstallationToken(installationId);
+  const prState = await fetchPr(token, repo, prNumber);
+  if (prState.state !== "open") {
+    console.log(`[auto-merge] PR #${prNumber} is ${prState.state}, skipping`);
+    return;
+  }
+  const authorLogin = prState.user.login;
+  const authorType = prState.user.type;
+  const isBot = authorType === "Bot" || /\[bot\]$/.test(authorLogin);
+  if (!isBot) {
+    const firstTime = await isFirstTimeAuthor(token, repo, authorLogin);
+    if (firstTime) {
+      console.log(`[auto-merge] PR #${prNumber} first-time author ${authorLogin}, skipping`);
+      return;
+    }
+  }
   const { claimed, countToday } = await db.claimStagingMergeSlot(prNumber, repo, DAILY_MERGE_CAP);
   if (!claimed) {
     console.log(`[auto-merge] PR #${prNumber} cap reached or already staged (${countToday}/${DAILY_MERGE_CAP} today)`);
@@ -2465,9 +2537,6 @@ setAutoMergeHook(autoMergeReadyPr);
 const BLOCKED_WATCH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 setInterval(() => { pollBlockedWatches().catch(console.error); }, BLOCKED_WATCH_INTERVAL_MS);
 pollBlockedWatches().catch(console.error);
-
-// Check every minute whether it's time to post the Slack daily merge summary.
-setInterval(() => { maybePostDailySummary().catch(console.error); }, 60_000);
 
 app.listen(PORT, () => {
   console.log(`listening on http://localhost:${PORT}`);

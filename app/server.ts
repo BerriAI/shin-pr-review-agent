@@ -19,8 +19,6 @@ import {
   initSystemPrompts,
   reviewPr,
   setAutoMergeHook,
-  renderCard,
-  type TriageCard,
   promptChatSession,
   promptChatSessionStreaming,
   listThreads,
@@ -507,7 +505,7 @@ async function runWebhookReview(
   console.log(
     `[webhook] delivery=${delivery} triggering review for ${pr.html_url} sha=${pr.head.sha} source=${source}`,
   );
-  const { runId, card: reviewCard } = await reviewPr(pr.html_url, { source });
+  const { runId } = await reviewPr(pr.html_url, { source });
   console.log(
     `[webhook] delivery=${delivery} review complete for PR #${prNumber} sha=${pr.head.sha} elapsedMs=${Date.now() - t0}`,
   );
@@ -2335,6 +2333,7 @@ async function autoMergeReadyPr(
   prNumber: number,
   repo: string,
   runId: string,
+  cardText: string,
 ): Promise<void> {
   const org = repo.split("/")[0];
   const installationId = await getOrgInstallationId(org);
@@ -2345,7 +2344,7 @@ async function autoMergeReadyPr(
     return;
   }
   console.log(`[auto-merge] PR #${prNumber} READY — merging to staging (${countToday + 1}/${DAILY_MERGE_CAP} today)`);
-  const mergeResult = await mergePrToAgentBranch(token, repo, prNumber, agentBranchName());
+  const mergeResult = await mergePrToAgentBranch(token, repo, prNumber, agentBranchName(), cardText);
   await db.updateStagingMergeResult(prNumber, repo, {
     stagingPrUrl: mergeResult.staging_pr_url,
     stagingPrNumber: mergeResult.staging_pr_number,

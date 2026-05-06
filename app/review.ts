@@ -27,7 +27,7 @@ import * as db from "./db.js";
 // claimStagingMergeSlot's ON CONFLICT ensures only one attempt wins if both
 // the hook and a caller's own post-review logic try concurrently.
 
-type AutoMergeHook = (prUrl: string, prNumber: number, repo: string, runId: string) => Promise<void>;
+type AutoMergeHook = (prUrl: string, prNumber: number, repo: string, runId: string, cardText: string) => Promise<void>;
 let _autoMergeHook: AutoMergeHook | null = null;
 export function setAutoMergeHook(fn: AutoMergeHook): void { _autoMergeHook = fn; }
 
@@ -2166,7 +2166,7 @@ export async function reviewPr(
   if (card.verdict === "READY" && _autoMergeHook && triage?.pr_number) {
     const repoMatch = prUrl.match(/github\.com\/([^/]+\/[^/]+)\/pull\//);
     if (repoMatch) {
-      await _autoMergeHook(prUrl, triage.pr_number, repoMatch[1], runId).catch((e) =>
+      await _autoMergeHook(prUrl, triage.pr_number, repoMatch[1], runId, cardText).catch((e) =>
         dbg(`reviewPr: autoMergeHook error`, e),
       );
     }

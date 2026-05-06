@@ -82,37 +82,49 @@ assert(
 );
 
 // ---------------------------------------------------------------------------
-// 4. Webhook path wires card through
+// 4. Unified hook architecture: all merges through autoMergeReadyPr
 // ---------------------------------------------------------------------------
-console.log("\n[4] Webhook path");
+console.log("\n[4] Unified hook architecture");
+// All three old paths (webhook, blocked-watch, chat) now call mergePrToAgentBranch
+// exclusively through autoMergeReadyPr via the autoMergeHook.
 assert(
-  srvSrc.includes("const { runId, card: reviewCard } = await reviewPr("),
-  "webhook path destructures card from reviewPr()",
+  srvSrc.includes("setAutoMergeHook(autoMergeReadyPr)"),
+  "autoMergeReadyPr registered as the hook",
 );
+// Only autoMergeReadyPr and the manual merge API endpoint call mergePrToAgentBranch directly.
+// Webhook and blocked-watch must NOT add additional direct calls.
+const mergeCallCount = (srvSrc.match(/await mergePrToAgentBranch\(/g) ?? []).length;
 assert(
-  srvSrc.includes("agentBranchName(), reviewCard)"),
-  "webhook path passes reviewCard to mergePrToAgentBranch",
+  mergeCallCount === 2,
+  `exactly 2 mergePrToAgentBranch call sites (hook + manual API) — found ${mergeCallCount}`,
+);
+// Confirm hook registration is in startup section
+assert(
+  srvSrc.includes("setAutoMergeHook(autoMergeReadyPr)"),
+  "hook wired at startup",
 );
 
 // ---------------------------------------------------------------------------
-// 5. Blocked-watch path wires card through
+// 5. Auto-merge hook passes cardText through
 // ---------------------------------------------------------------------------
-console.log("\n[5] Blocked-watch path");
+console.log("\n[5] Auto-merge hook path");
+const reviewSrc2 = readFileSync(resolve(ROOT, "app/review.ts"), "utf8");
 assert(
-  srvSrc.includes("renderCard,") || srvSrc.includes("renderCard\n"),
-  "renderCard imported in server.ts",
+  reviewSrc2.includes("runId: string, cardText: string") ||
+  reviewSrc2.includes("cardText: string) => Promise<void>"),
+  "AutoMergeHook type includes cardText param",
 );
 assert(
-  srvSrc.includes("type TriageCard,") || srvSrc.includes("type TriageCard\n"),
-  "TriageCard type imported in server.ts",
+  reviewSrc2.includes("_autoMergeHook(prUrl, triage.pr_number, repoMatch[1], runId, cardText)"),
+  "autoMergeHook called with cardText at call site in review.ts",
 );
 assert(
-  srvSrc.includes("renderCard(finalRun.card as unknown as TriageCard)"),
-  "blocked-watch renders finalRun.card via renderCard",
+  srvSrc.includes("cardText: string,") && srvSrc.includes("autoMergeReadyPr"),
+  "autoMergeReadyPr accepts cardText param",
 );
 assert(
-  srvSrc.includes("agentBranchName(), watchReviewCard)"),
-  "blocked-watch passes watchReviewCard to mergePrToAgentBranch",
+  srvSrc.includes("agentBranchName(), cardText)"),
+  "autoMergeReadyPr passes cardText to mergePrToAgentBranch",
 );
 
 // ---------------------------------------------------------------------------

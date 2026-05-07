@@ -87,6 +87,10 @@ const STAGING_PR_REVIEWERS = (process.env.STAGING_PR_REVIEWERS ?? "")
   .map((s) => s.trim())
   .filter(Boolean);
 
+const STAGING_BRANCH_PREFIX =
+  process.env.STAGING_BRANCH_PREFIX ?? "shin_agent_oss_staging_";
+const LEGACY_STAGING_BRANCH_PREFIXES = ["litellm_agent_oss_staging_"];
+
 function bearerToken(req: Request): string | null {
   const h = req.headers.authorization ?? "";
   if (!h.toLowerCase().startsWith("bearer ")) return null;
@@ -195,7 +199,7 @@ function agentBranchName(): string {
   const mm = String(now.getMonth() + 1).padStart(2, "0");
   const dd = String(now.getDate()).padStart(2, "0");
   const yyyy = now.getFullYear();
-  return `shin_agent_oss_staging_${mm}_${dd}_${yyyy}`;
+  return `${STAGING_BRANCH_PREFIX}${mm}_${dd}_${yyyy}`;
 }
 
 async function ensureBranch(
@@ -1587,8 +1591,8 @@ app.get("/api/v1/staging-prs", requireLogin, async (req, res) => {
   res.json(
     prs
       .filter((p) =>
-        p.head.ref.startsWith("shin_agent_oss_staging_") ||
-        p.head.ref.startsWith("litellm_agent_oss_staging_"),
+        p.head.ref.startsWith(STAGING_BRANCH_PREFIX) ||
+        LEGACY_STAGING_BRANCH_PREFIXES.some((pre) => p.head.ref.startsWith(pre)),
       )
       .map((p) => ({
         number: p.number,

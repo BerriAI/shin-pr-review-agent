@@ -76,6 +76,12 @@
   .merge-btn.merging{background:#fff3cc;border-color:#d4a600}
   .merge-btn.merged{background:#d4f4dd;border-color:#0a5;color:#0a5}
   .merge-btn.merge-error{background:#fde0e0;border-color:#c33;color:#c00}
+  .revert-btn{margin-left:6px;background:#fff0f0;border-color:#c33;color:#b00}
+  .revert-btn:hover:not(:disabled){background:#fde0e0}
+  .revert-btn:disabled{opacity:.5;cursor:wait}
+  .revert-btn.reverting{background:#fde0e0;border-color:#c33}
+  .revert-btn.reverted{background:#f5f5f5;border-color:#aaa;color:#666}
+  .revert-btn.revert-error{background:#fde0e0;border-color:#c33;color:#c00}
   .merge-branch-label{font-size:11px;color:#0a5;margin-left:6px}
   .json-section{background:#f6f6f9;border:1px solid #e0e0e3;border-radius:6px;margin-bottom:14px;overflow:hidden}
   .json-section summary{padding:10px 18px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#666;cursor:pointer;user-select:none;list-style:none;display:flex;align-items:center;gap:8px}
@@ -187,7 +193,61 @@
   #auto-merged-list{flex:1;overflow-y:auto;display:none}
   .auto-merged-row{padding:10px 14px;border-bottom:1px solid #eee;display:flex;flex-direction:column;gap:3px}
   .auto-merged-row:hover{background:#eef}
+  .auto-merged-row.has-run{cursor:pointer}
   .auto-merged-badge{font-size:10px;padding:1px 5px;border-radius:3px;background:#d4f4dd;color:#0a5;font-weight:600;flex-shrink:0}
+  /* ── Conversation pane ──────────────────────────────────────────────── */
+  .right-pane[data-pane="chat"]{overflow:hidden;padding:0;display:flex;flex-direction:column;background:#fff}
+  .right-pane[data-pane="chat"].hidden{display:none}
+  .conv-wrap{display:flex;flex-direction:column;flex:1;overflow:hidden}
+  .conv-body{flex:1;overflow-y:auto;padding:0}
+
+  /* Trigger header */
+  .conv-trigger{padding:18px 20px 14px;border-bottom:1px solid #eee}
+  .conv-trigger-who{font-size:11px;color:#999;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+  .conv-trigger-badge{display:inline-block;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;padding:1px 6px;border-radius:3px;background:#f0f0f3;color:#666}
+  .conv-trigger-title{font-size:15px;font-weight:500;color:#111;line-height:1.4}
+  .conv-trigger-title a{color:#111;text-decoration:none}
+  .conv-trigger-title a:hover{color:#06c}
+
+  /* Agent block */
+  .conv-agent-block{padding:16px 20px;border-bottom:1px solid #eee}
+  .conv-agent-meta{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+  .conv-agent-avatar{width:20px;height:20px;border-radius:4px;background:#222;display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;flex-shrink:0}
+  .conv-worked{font-size:11px;color:#888}
+  .conv-worked strong{color:#444;font-weight:500}
+  .conv-agent-text{font-size:13px;color:#333;white-space:pre-wrap;line-height:1.65}
+
+  /* Follow-ups */
+  .conv-followups{padding:0 20px 16px}
+  .conv-fu-user{margin:16px 0 8px}
+  .conv-fu-who{font-size:11px;color:#999;margin-bottom:5px;font-weight:500}
+  .conv-fu-bubble{background:#f4f4f6;border-radius:6px;padding:9px 13px;font-size:13px;color:#222;line-height:1.5}
+  .conv-fu-bot{margin:8px 0 4px;font-size:13px;color:#333;white-space:pre-wrap;line-height:1.65;padding-left:28px;position:relative}
+  .conv-fu-bot::before{content:'◆';position:absolute;left:4px;top:2px;font-size:9px;color:#ccc}
+  .conv-fu-tool{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#999;padding:2px 0 2px 28px;margin:1px 0}
+  .conv-fu-err{font-size:12px;color:#c00;padding-left:28px;margin:4px 0}
+
+  /* Thinking */
+  .conv-thinking{display:flex;align-items:center;gap:4px;padding:10px 0 4px 28px}
+  .conv-dot{width:5px;height:5px;border-radius:50%;background:#ccc;animation:conv-bounce .8s ease-in-out infinite}
+  .conv-dot:nth-child(2){animation-delay:.16s}
+  .conv-dot:nth-child(3){animation-delay:.32s}
+  @keyframes conv-bounce{0%,60%,100%{transform:translateY(0);opacity:.4}30%{transform:translateY(-4px);opacity:1}}
+
+  /* Input */
+  .conv-input-area{border-top:1px solid #eee;padding:10px 14px 12px;flex-shrink:0;background:#fff}
+  .conv-input-box{
+    width:100%;padding:9px 12px;
+    border:1px solid #e0e0e3;border-radius:7px;
+    font:inherit;font-size:13px;color:#222;
+    resize:none;min-height:38px;max-height:130px;overflow-y:auto;
+    background:#fafafa;outline:none;
+    transition:border-color .15s,background .15s;
+    line-height:1.5;
+  }
+  .conv-input-box:focus{border-color:#bbb;background:#fff}
+  .conv-input-box::placeholder{color:#bbb}
+  .conv-input-hint{font-size:10.5px;color:#ccc;margin-top:5px;padding-left:2px}
 </style></head>
 <body>
 <aside id="sidebar">
@@ -519,6 +579,8 @@ document.addEventListener('click', (e) => {
 });
 
 let activeArm = 'triage';
+let runChatThreadId = null;
+let runChatSending = false;
 
 function switchArm(arm, rec){
   activeArm = arm;
@@ -603,6 +665,103 @@ async function copyDebugDump(rec){
   }
 }
 
+async function sendRunChat(rec) {
+  if (runChatSending) return;
+  const input = document.getElementById('chat-input');
+  const followups = document.getElementById('conv-followups');
+  const convBody = document.getElementById('conv-body');
+  if (!input || !followups) return;
+  const msg = input.value.trim();
+  if (!msg) return;
+
+  runChatSending = true;
+  input.value = '';
+  input.disabled = true;
+
+  const fullMsg = msg;
+
+  // Render user bubble
+  const userDiv = document.createElement('div');
+  userDiv.className = 'conv-fu-user';
+  userDiv.innerHTML = `<div class="conv-fu-who">You</div><div class="conv-fu-bubble">${escapeHtml(msg)}</div>`;
+  followups.appendChild(userDiv);
+
+  // Thinking indicator
+  const thinkDiv = document.createElement('div');
+  thinkDiv.className = 'conv-fu-bot';
+  thinkDiv.innerHTML = `<div class="conv-thinking"><span class="conv-dot"></span><span class="conv-dot"></span><span class="conv-dot"></span></div>`;
+  followups.appendChild(thinkDiv);
+  convBody.scrollTop = convBody.scrollHeight;
+
+  try {
+    const threadId = runChatThreadId ?? (crypto.randomUUID().replace(/-/g, ''));
+    const r = await authFetch('/chat/stream', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        message: fullMsg,
+        thread_id: threadId,
+        title: `PR #${rec.pr_number} ${rec.pr_title}`,
+        run_id: rec.run_id,
+      }),
+    });
+    runChatThreadId = threadId;
+
+    if (!r.ok) {
+      thinkDiv.className = 'conv-fu-err';
+      thinkDiv.textContent = 'Error: HTTP ' + r.status;
+      return;
+    }
+
+    thinkDiv.className = 'conv-fu-bot';
+    thinkDiv.innerHTML = '';
+    let botText = '';
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+        if (evt.type === 'text_delta') {
+          botText += evt.delta;
+          thinkDiv.textContent = botText;
+        } else if (evt.type === 'done') {
+          thinkDiv.textContent = evt.output || botText;
+        } else if (evt.type === 'tool_call' || evt.type === 'tool_result' || evt.type === 'progress') {
+          const toolDiv = document.createElement('div');
+          toolDiv.className = 'conv-fu-tool';
+          toolDiv.textContent = evt.type === 'tool_call'
+            ? '→ ' + evt.tool
+            : evt.type === 'tool_result'
+            ? '← ' + evt.tool + (evt.isError ? ' ERROR' : '') + ': ' + evt.preview
+            : '⋯ ' + evt.text;
+          followups.insertBefore(toolDiv, thinkDiv);
+        } else if (evt.type === 'error') {
+          thinkDiv.className = 'conv-fu-err';
+          thinkDiv.textContent = evt.message;
+        }
+        convBody.scrollTop = convBody.scrollHeight;
+      }
+    }
+  } catch (err) {
+    thinkDiv.className = 'conv-fu-err';
+    thinkDiv.textContent = String(err);
+  } finally {
+    runChatSending = false;
+    input.disabled = false;
+    input.focus();
+    convBody.scrollTop = convBody.scrollHeight;
+  }
+}
+
 function logfireLink(rec){
   if (!rec.logfire_trace_id) return '';
   // Generic Logfire trace deep-link. Self-host users can set their own
@@ -644,8 +803,10 @@ function renderDetail(rec){
         <span>${fmtTime(rec.ts)} · ${fmtDuration(rec.duration_s)} · ${fmtCost(rec.cost_usd)}${tokenLine}</span>
         <span>${escapeHtml(rec.model_name || '')}${logfireLink(rec)}</span>
         <button id="copy-dump-btn" class="copy-btn" type="button">Copy debug dump</button>
-        <button id="merge-btn" class="copy-btn merge-btn" type="button">Merge to staging ↗</button>
-        <span id="merge-branch-label" class="merge-branch-label"></span>
+        ${rec.is_staged
+          ? `<button id="revert-btn" class="copy-btn revert-btn" type="button">Revert from staging ✕</button>`
+          : `<button id="merge-btn" class="copy-btn merge-btn" type="button">Merge to staging ↗</button>`}
+        <span id="merge-branch-label" class="merge-branch-label">${rec.is_staged && rec.staging_pr_url ? '→ <a href="' + escapeHtml(rec.staging_pr_url) + '" target="_blank" style="color:#0a5">PR #' + rec.staging_pr_number + ' ↗</a>' : ''}</span>
       </div>
     </div>
     <div class="detail-body">
@@ -687,6 +848,7 @@ function renderDetail(rec){
             Annotation
             <span class="count label-${rec.human_label || 'empty'}">${escapeHtml(labelTagText)}</span>
           </button>
+          <button class="right-tab" data-rtab="chat" type="button">Chat</button>
         </div>
         <div class="right-pane" data-pane="trace">
           <div class="trace-controls">
@@ -716,11 +878,40 @@ function renderDetail(rec){
             </div>
           </div>
         </div>
+        <div class="right-pane hidden" data-pane="chat" style="padding:0;overflow:hidden">
+          <div class="conv-wrap">
+            <div class="conv-body" id="conv-body">
+              <div class="conv-trigger">
+                <div class="conv-trigger-who">
+                  <span class="conv-trigger-badge">${escapeHtml(rec.source || 'webhook')}</span>
+                  ${rec.ts ? fmtTime(rec.ts) : ''}
+                </div>
+                <div class="conv-trigger-title"><a href="${escapeHtml(rec.pr_url)}" target="_blank">#${rec.pr_number} ${escapeHtml(rec.pr_title)}</a></div>
+              </div>
+              <div class="conv-agent-block">
+                <div class="conv-agent-meta">
+                  <div class="conv-agent-avatar">◆</div>
+                  <div class="conv-worked">Worked for <strong>${fmtDuration(rec.duration_s)}</strong> · ${fmtCost(rec.cost_usd)}</div>
+                </div>
+                <div class="conv-agent-text">${escapeHtml(renderCardText(rec.card || {}))}</div>
+              </div>
+              <div class="conv-followups" id="conv-followups"></div>
+            </div>
+            <div class="conv-input-area">
+              <textarea class="conv-input-box" id="chat-input" rows="1" placeholder="Add a follow up…"></textarea>
+              <div class="conv-input-hint">Enter to send · Shift+Enter for newline</div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   `;
   document.getElementById('copy-dump-btn').addEventListener('click', () => copyDebugDump(rec));
-  document.getElementById('merge-btn').addEventListener('click', () => mergePrToStagingBranch(rec.pr_number, rec.pr_url));
+  if (rec.is_staged) {
+    document.getElementById('revert-btn').addEventListener('click', () => revertFromStagingBranch(rec.pr_number, rec.pr_url));
+  } else {
+    document.getElementById('merge-btn').addEventListener('click', () => mergePrToStagingBranch(rec.pr_number, rec.pr_url));
+  }
   document.getElementById('save-btn').addEventListener('click', () => saveLabel(rec.run_id));
   document.getElementById('graduate-btn').addEventListener('click', () => graduate(rec.run_id));
   for (const btn of document.querySelectorAll('.arm-tab')) {
@@ -731,6 +922,10 @@ function renderDetail(rec){
   }
   document.getElementById('toggle-all-btn').addEventListener('click', toggleAllParts);
   activeArm = 'triage';
+  runChatThreadId = null;
+  document.getElementById('chat-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRunChat(rec); }
+  });
 }
 
 // Toggle every part-body in the active arm. Tracks state on the button
@@ -830,6 +1025,35 @@ async function mergePrToStagingBranch(prNumber, prUrl){
   } catch (err) {
     btn.textContent = 'Merge failed ✗';
     btn.className = 'copy-btn merge-btn merge-error';
+    branchLabel.textContent = String(err);
+    branchLabel.style.color = '#c00';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function revertFromStagingBranch(prNumber, prUrl){
+  const btn = document.getElementById('revert-btn');
+  const branchLabel = document.getElementById('merge-branch-label');
+  const match = prUrl.match(/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/);
+  if (!match) { alert('Could not parse repo from PR URL: ' + prUrl); return; }
+  const repo = match[1];
+  if (!confirm('Revert PR #' + prNumber + ' from staging? This rebuilds the staging branch.')) return;
+  btn.disabled = true;
+  btn.textContent = 'Reverting…';
+  btn.className = 'copy-btn revert-btn reverting';
+  branchLabel.textContent = '';
+  try {
+    const r = await authFetch(`/api/v1/prs/${prNumber}/staging-merge?repo=${encodeURIComponent(repo)}`, { method: 'DELETE' });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+    btn.textContent = 'Reverted ✓';
+    btn.className = 'copy-btn revert-btn reverted';
+    branchLabel.textContent = `staging rebuilt (${data.mergesReplayed} PR${data.mergesReplayed === 1 ? '' : 's'} remaining)`;
+    branchLabel.style.color = '#666';
+  } catch (err) {
+    btn.textContent = 'Revert failed ✗';
+    btn.className = 'copy-btn revert-btn revert-error';
     branchLabel.textContent = String(err);
     branchLabel.style.color = '#c00';
   } finally {
@@ -1146,6 +1370,7 @@ async function loadAutoMerges() {
       listEl.innerHTML = '<div class="empty">No auto-merged PRs yet.</div>';
       return;
     }
+    const todayStr = new Date().toDateString();
     let lastGroup = null;
     let html = '';
     for (const m of merges) {
@@ -1160,21 +1385,57 @@ async function loadAutoMerges() {
         ? escapeHtml(m.pr_title)
         : '#' + m.pr_number;
       const time = d.toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+      const isToday = d.toDateString() === todayStr;
+      const isReverted = !!m.reverted_at_epoch;
       const stagingLink = m.staging_pr_url
         ? `<a href="${escapeHtml(m.staging_pr_url)}" target="_blank" rel="noopener" style="color:#0a5">Staging PR #${m.staging_pr_number} ↗</a>`
         : '—';
-      html += `<div class="auto-merged-row">
+      const badge = isReverted
+        ? `<span class="auto-merged-badge" style="background:#f5e6e6;color:#b00">reverted</span>`
+        : `<span class="auto-merged-badge">merged</span>`;
+      const revertBtn = isToday && !isReverted
+        ? `<button class="revert-row-btn copy-btn revert-btn" style="margin-left:auto;padding:3px 8px;font-size:11px" data-pr="${m.pr_number}" data-repo="${escapeHtml(m.repo)}" type="button">Revert ✕</button>`
+        : '';
+      const hasRun = !!m.run_id;
+      html += `<div class="auto-merged-row${hasRun ? ' has-run' : ''}" data-merge-id="${m.id}"${hasRun ? ` data-run-id="${escapeHtml(m.run_id)}"` : ''}>
         <div class="staging-row-top">
           <span class="staging-pr-num">#${m.pr_number}</span>
-          <a href="${prUrl}" target="_blank" rel="noopener" class="staging-pr-title" style="color:#06c;text-decoration:none">${title}</a>
-          <span class="auto-merged-badge">merged</span>
+          <span class="staging-pr-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:13px;font-weight:500">${title}</span>
+          ${badge}
+          ${revertBtn}
         </div>
-        <div class="staging-pr-meta">${m.pr_author ? escapeHtml(m.pr_author) + ' · ' : ''}${time} · ${stagingLink}</div>
+        <div class="staging-pr-meta">${m.pr_author ? escapeHtml(m.pr_author) + ' · ' : ''}${time} · ${stagingLink}${hasRun ? ' · <span style="color:#06c;font-size:11px">View run →</span>' : ''}</div>
       </div>`;
     }
     listEl.innerHTML = html;
   } catch (err) {
     listEl.innerHTML = '<div class="empty err">' + escapeHtml(String(err)) + '</div>';
+  }
+}
+
+async function handleAutoMergedRevert(e) {
+  const btn = e.target.closest('.revert-row-btn');
+  if (!btn) return;
+  const prNumber = btn.dataset.pr;
+  const repo = btn.dataset.repo;
+  if (!confirm('Revert PR #' + prNumber + ' from staging? This rebuilds the staging branch.')) return;
+  btn.disabled = true;
+  btn.textContent = 'Reverting…';
+  btn.className = 'copy-btn revert-btn reverting';
+  try {
+    const r = await authFetch(`/api/v1/prs/${prNumber}/staging-merge?repo=${encodeURIComponent(repo)}`, { method: 'DELETE' });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+    btn.textContent = 'Reverted ✓';
+    btn.className = 'copy-btn revert-btn reverted';
+    const row = btn.closest('.auto-merged-row');
+    const badge = row.querySelector('.auto-merged-badge');
+    if (badge) { badge.textContent = 'reverted'; badge.style.cssText = 'background:#f5e6e6;color:#b00'; }
+    btn.remove();
+  } catch (err) {
+    btn.textContent = 'Failed ✗';
+    btn.className = 'copy-btn revert-btn revert-error';
+    btn.disabled = false;
   }
 }
 
@@ -1186,6 +1447,15 @@ for (const tab of document.querySelectorAll('.filter-tab')) {
     renderRunsList();
   });
 }
+
+// --- Auto-merged revert delegation + run navigation --------------------------
+document.getElementById('auto-merged-list').addEventListener('click', (e) => {
+  handleAutoMergedRevert(e);
+  if (e.target.closest('.revert-row-btn')) return;
+  const row = e.target.closest('.auto-merged-row');
+  if (!row || !row.dataset.runId) return;
+  loadDetail(row.dataset.runId);
+});
 
 // --- Backfill button ----------------------------------------------------------
 document.getElementById('backfill-btn').addEventListener('click', async () => {

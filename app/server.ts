@@ -82,6 +82,11 @@ function isWhitelistedLogin(login: string): boolean {
   });
 }
 
+const STAGING_PR_REVIEWERS = (process.env.STAGING_PR_REVIEWERS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 function bearerToken(req: Request): string | null {
   const h = req.headers.authorization ?? "";
   if (!h.toLowerCase().startsWith("bearer ")) return null;
@@ -288,6 +293,27 @@ async function ensureStagingPr(
   if (!createR.ok)
     throw new Error(`staging PR create failed: ${createR.status} ${await createR.text()}`);
   const created = (await createR.json()) as { html_url: string; number: number };
+
+  if (STAGING_PR_REVIEWERS.length) {
+    const revR = await fetch(
+      `https://api.github.com/repos/${repoFullName}/pulls/${created.number}/requested_reviewers`,
+      {
+        method: "POST",
+        headers: { ...ghHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ reviewers: STAGING_PR_REVIEWERS }),
+      },
+    );
+    if (!revR.ok) {
+      console.warn(
+        `[staging-pr] reviewer request failed for PR #${created.number}: ${revR.status} ${await revR.text()}`,
+      );
+    } else {
+      console.log(
+        `[staging-pr] requested reviewers ${STAGING_PR_REVIEWERS.join(",")} on PR #${created.number}`,
+      );
+    }
+  }
+
   return { html_url: created.html_url, number: created.number, created: true };
 }
 

@@ -138,7 +138,7 @@ function buildMergeComment(agentBranch: string, stagingPrUrl: string, reviewCard
     : `🤖 **litellm-agent**: Merged into staging branch \`${agentBranch}\`. Staging PR: ${stagingPrUrl}`;
 }
 
-const BRANCH = "litellm_agent_oss_staging_05_05_2026";
+const BRANCH = "shin_agent_oss_staging_05_05_2026";
 const STAGING_URL = "https://github.com/BerriAI/litellm/pull/999";
 const CARD = "*Triage Summary*\nFixes null guard on streaming.\n\n*Merge Confidence: 4/5*  ✅ READY\nReady to ship.\n\nNo blocking issues.";
 

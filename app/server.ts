@@ -190,7 +190,7 @@ function agentBranchName(): string {
   const mm = String(now.getMonth() + 1).padStart(2, "0");
   const dd = String(now.getDate()).padStart(2, "0");
   const yyyy = now.getFullYear();
-  return `litellm_agent_oss_staging_${mm}_${dd}_${yyyy}`;
+  return `shin_agent_oss_staging_${mm}_${dd}_${yyyy}`;
 }
 
 async function ensureBranch(
@@ -444,7 +444,7 @@ async function getOrgInstallationId(org: string): Promise<number> {
 }
 
 async function listOpenPrs(token: string, repoFullName: string, limit: number): Promise<Array<{
-  number: number; html_url: string; draft: boolean; head: { sha: string };
+  number: number; html_url: string; draft: boolean; head: { sha: string }; user: { login: string };
 }>> {
   const perPage = Math.min(limit, 100);
   const r = await fetch(
@@ -458,7 +458,7 @@ async function listOpenPrs(token: string, repoFullName: string, limit: number): 
     },
   );
   if (!r.ok) throw new Error(`PR list failed: ${r.status}`);
-  const prs = await r.json() as Array<{ number: number; html_url: string; draft: boolean; head: { sha: string } }>;
+  const prs = await r.json() as Array<{ number: number; html_url: string; draft: boolean; head: { sha: string }; user: { login: string } }>;
   return prs.slice(0, limit);
 }
 
@@ -1357,7 +1357,14 @@ app.post("/api/v1/backfill", requireLogin, async (req, res) => {
     res.status(500).json({ error: `could not list PRs: ${err}` }); return;
   }
 
-  const eligible = prs.filter(p => !p.draft);
+  const eligible = prs.filter(p => {
+    if (p.draft) return false;
+    if (_WHITELIST_ENTRIES.length && isWhitelistedLogin(p.user.login)) {
+      console.log(`[backfill] skipping ${p.html_url} — author=${p.user.login} is whitelisted`);
+      return false;
+    }
+    return true;
+  });
   res.json({ queued: eligible.length, total_fetched: prs.length, repo });
 
   // Run sequentially to avoid hammering the LLM
@@ -1553,7 +1560,10 @@ app.get("/api/v1/staging-prs", requireLogin, async (req, res) => {
   }>;
   res.json(
     prs
-      .filter((p) => p.head.ref.startsWith("litellm_agent_oss_staging_"))
+      .filter((p) =>
+        p.head.ref.startsWith("shin_agent_oss_staging_") ||
+        p.head.ref.startsWith("litellm_agent_oss_staging_"),
+      )
       .map((p) => ({
         number: p.number,
         title: p.title,
@@ -2441,6 +2451,12 @@ async function pollBlockedWatches(): Promise<void> {
 
       if (!pr || pr.state !== "open") {
         console.log(`[blocked-watch] PR #${prNumber} no longer open — deleting run ${runId}`);
+        await db.deleteRun(runId);
+        continue;
+      }
+
+      if (_WHITELIST_ENTRIES.length && isWhitelistedLogin(pr.user.login)) {
+        console.log(`[blocked-watch] PR #${prNumber} author=${pr.user.login} is whitelisted — deleting run ${runId}`);
         await db.deleteRun(runId);
         continue;
       }

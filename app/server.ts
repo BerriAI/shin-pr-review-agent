@@ -881,10 +881,11 @@ app.delete("/chat/api/threads/:id", requireLogin, (req, res) => {
 // --- Chat API endpoint --------------------------------------------------------
 
 app.post("/chat/api", requireLogin, async (req, res) => {
-  const { message, thread_id, title } = req.body as {
+  const { message, thread_id, title, run_id } = req.body as {
     message?: string;
     thread_id?: string;
     title?: string;
+    run_id?: string;
   };
   if (!message?.trim())
     return res.status(400).json({ error: "message is empty" });
@@ -892,17 +893,18 @@ app.post("/chat/api", requireLogin, async (req, res) => {
   const tid = thread_id ?? randomUUID().replace(/-/g, "");
   const t0 = Date.now();
   dbg(
-    `POST /chat/api: ENTER tid=${tid} msgLen=${message.length} preview="${message.slice(0, 80)}"`,
+    `POST /chat/api: ENTER tid=${tid} runId=${run_id ?? "none"} msgLen=${message.length} preview="${message.slice(0, 80)}"`,
   );
   try {
-    await ensureChatSession(tid, title);
+    await ensureChatSession(tid, title, run_id);
     dbg(
       `POST /chat/api: ensureChatSession done (${Date.now() - t0}ms), calling promptChatSession`,
     );
-    const { output, toolTrace, availableTools } = await promptChatSession(
+    const { output, toolTrace, availableTools, intent } = await promptChatSession(
       tid,
       message,
       title,
+      run_id,
     );
     dbg(
       `POST /chat/api: promptChatSession resolved (${Date.now() - t0}ms total) outputLen=${output.length}`,
@@ -912,6 +914,7 @@ app.post("/chat/api", requireLogin, async (req, res) => {
       tool_trace: toolTrace,
       thread_id: tid,
       available_tools: availableTools,
+      intent,
     });
   } catch (err) {
     dbg(`POST /chat/api: THREW after ${Date.now() - t0}ms`, err);
@@ -926,10 +929,11 @@ app.post("/chat/api", requireLogin, async (req, res) => {
 // --- Streaming chat (SSE) -----------------------------------------------------
 
 app.post("/chat/stream", requireLogin, async (req, res) => {
-  const { message, thread_id, title } = req.body as {
+  const { message, thread_id, title, run_id } = req.body as {
     message?: string;
     thread_id?: string;
     title?: string;
+    run_id?: string;
   };
   if (!message?.trim())
     return res.status(400).json({ error: "message is empty" });
@@ -937,7 +941,7 @@ app.post("/chat/stream", requireLogin, async (req, res) => {
   const tid = thread_id ?? randomUUID().replace(/-/g, "");
   const t0 = Date.now();
   dbg(
-    `POST /chat/stream: ENTER tid=${tid} msgLen=${message.length} preview="${message.slice(0, 80)}"`,
+    `POST /chat/stream: ENTER tid=${tid} runId=${run_id ?? "none"} msgLen=${message.length} preview="${message.slice(0, 80)}"`,
   );
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -947,13 +951,17 @@ app.post("/chat/stream", requireLogin, async (req, res) => {
   const send = (obj: object) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
 
   try {
-    await ensureChatSession(tid, title);
+    await ensureChatSession(tid, title, run_id);
     dbg(
       `POST /chat/stream: ensureChatSession done (${Date.now() - t0}ms), calling promptChatSessionStreaming`,
     );
-    const { output, toolTrace, availableTools } =
-      await promptChatSessionStreaming(tid, message, title, (event) =>
-        send(event),
+    const { output, toolTrace, availableTools, intent } =
+      await promptChatSessionStreaming(
+        tid,
+        message,
+        title,
+        (event) => send(event),
+        run_id,
       );
     dbg(
       `POST /chat/stream: promptChatSessionStreaming resolved (${Date.now() - t0}ms total)`,
@@ -964,6 +972,7 @@ app.post("/chat/stream", requireLogin, async (req, res) => {
       tool_trace: toolTrace,
       thread_id: tid,
       available_tools: availableTools,
+      intent,
     });
   } catch (err) {
     dbg(`POST /chat/stream: THREW after ${Date.now() - t0}ms`, err);
@@ -986,6 +995,7 @@ app.post("/v1/chat/completions", requireLogin, async (req, res) => {
     title?: string;
     model?: string;
     stream?: boolean;
+    run_id?: string;
   };
   const msgs = body?.messages ?? [];
   const lastUser = [...msgs].reverse().find((m) => m.role === "user");
@@ -1006,11 +1016,12 @@ app.post("/v1/chat/completions", requireLogin, async (req, res) => {
 
   const sid = body.session_id ?? randomUUID().replace(/-/g, "");
   try {
-    await ensureChatSession(sid, body.title);
+    await ensureChatSession(sid, body.title, body.run_id);
     const { output, toolTrace } = await promptChatSession(
       sid,
       userText,
       body.title,
+      body.run_id,
     );
     res.json({
       id: `chatcmpl-${randomUUID()}`,
@@ -1934,6 +1945,11 @@ const openApiSpec = {
                   message: { type: "string" },
                   thread_id: { type: "string" },
                   title: { type: "string" },
+                  run_id: {
+                    type: "string",
+                    description:
+                      "Optional run_id to anchor this chat thread to an existing PR review run; enables debug intent.",
+                  },
                 },
               },
             },
@@ -1980,6 +1996,11 @@ const openApiSpec = {
                   message: { type: "string" },
                   thread_id: { type: "string" },
                   title: { type: "string" },
+                  run_id: {
+                    type: "string",
+                    description:
+                      "Optional run_id to anchor this chat thread to an existing PR review run; enables debug intent.",
+                  },
                 },
               },
             },
@@ -2025,6 +2046,11 @@ const openApiSpec = {
                   title: { type: "string" },
                   model: { type: "string" },
                   stream: { type: "boolean" },
+                  run_id: {
+                    type: "string",
+                    description:
+                      "Optional run_id to anchor this chat thread to an existing PR review run; enables debug intent.",
+                  },
                 },
               },
             },
@@ -2537,6 +2563,27 @@ setAutoMergeHook(autoMergeReadyPr);
 const BLOCKED_WATCH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 setInterval(() => { pollBlockedWatches().catch(console.error); }, BLOCKED_WATCH_INTERVAL_MS);
 pollBlockedWatches().catch(console.error);
+
+// Watchdog: flip karpathy_check rows stuck in "running" past 10 min into
+// "killed". The phase-A insertRun in reviewPr writes status="running" before
+// awaiting the karpathy E2B sandbox; if the host process is terminated
+// mid-await (Render redeploy, OOM), the row never reaches the post-karpathy
+// upsert. Without this poll those rows look indistinguishable from in-flight
+// reviews. 30-min cadence + 10-min staleness gives a comfortable margin over
+// the typical 60-180s karpathy run + 600s sandbox timeout ceiling.
+const KARPATHY_STUCK_INTERVAL_MS = 30 * 60 * 1000;
+async function pollStuckKarpathy(): Promise<void> {
+  try {
+    const flipped = await db.flipStuckKarpathyToKilled(600);
+    if (flipped > 0) {
+      console.log(`[karpathy-watchdog] flipped ${flipped} stuck rows to killed`);
+    }
+  } catch (e) {
+    console.error("[karpathy-watchdog] poll error:", e);
+  }
+}
+setInterval(() => { pollStuckKarpathy().catch(console.error); }, KARPATHY_STUCK_INTERVAL_MS);
+pollStuckKarpathy().catch(console.error);
 
 app.listen(PORT, () => {
   console.log(`listening on http://localhost:${PORT}`);

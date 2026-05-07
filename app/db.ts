@@ -271,6 +271,30 @@ export async function deleteEvalPr(setName: string, prId: number): Promise<boole
   return (rowCount ?? 0) > 0;
 }
 
+// Watchdog: flips runs whose karpathy_check is still "running" past the
+// staleness window into "killed", recording when the flip happened. Catches
+// the case where the host process was terminated mid-flight (Render
+// redeploy, OOM, SIGTERM) and the post-karpathy upsert in reviewPr never
+// executed. Without this, the row sits in "running" forever and looks
+// indistinguishable from a real in-flight run.
+//
+// Returns the count flipped. Caller logs that count.
+export async function flipStuckKarpathyToKilled(staleSeconds = 600): Promise<number> {
+  const { rowCount } = await pool().query(
+    `UPDATE runs
+     SET karpathy_check = karpathy_check
+       || jsonb_build_object(
+            'status', 'killed',
+            'flipped_at', EXTRACT(EPOCH FROM NOW())::float8
+          )
+     WHERE karpathy_check->>'status' = 'running'
+       AND (karpathy_check->>'started_at')::float8
+           < EXTRACT(EPOCH FROM NOW())::float8 - $1`,
+    [staleSeconds],
+  );
+  return rowCount ?? 0;
+}
+
 export async function startBlockedWatch(runId: string): Promise<void> {
   await pool().query(
     `UPDATE runs SET blocked_watch_started_at = NOW() WHERE run_id = $1 AND blocked_watch_started_at IS NULL`,

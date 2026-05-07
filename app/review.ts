@@ -751,6 +751,91 @@ export const KarpathyReviewSchema = z.object({
 });
 export type KarpathyReview = z.infer<typeof KarpathyReviewSchema>;
 
+// Discriminated record we persist into runs.karpathy_check (JSONB). Replaces
+// the old `KarpathyReview | null` storage which collapsed skipped/errored/
+// killed/ran-empty into the same `{}` and made post-hoc debugging impossible.
+// All fields beyond `status` are optional so future variants stay compatible.
+export type KarpathyErrorKind =
+  | "sandbox_create"
+  | "git_clone"
+  | "git_fetch"
+  | "files_write"
+  | "claude_exec_nonzero"
+  | "claude_403_exhausted"
+  | "claude_timeout_exhausted"
+  | "no_json_in_output"
+  | "schema_parse"
+  | "no_e2b_session"
+  | "no_anthropic_key"
+  | "unknown";
+
+export type KarpathySkipReason =
+  | "provisional_not_ready"
+  | "no_e2b_key"
+  | "no_anthropic_key"
+  | "invalid_pr_url";
+
+export type KarpathyCheckRecord =
+  | {
+      status: "skipped";
+      skip_reason: KarpathySkipReason;
+      provisional_verdict?: "READY" | "BLOCKED" | "WAITING";
+      provisional_score?: number;
+    }
+  | { status: "running"; started_at: number }
+  | {
+      status: "ok";
+      started_at: number;
+      finished_at: number;
+      duration_ms: number;
+      attempts: number;
+      result: KarpathyReview;
+    }
+  | {
+      status: "errored";
+      started_at: number;
+      finished_at: number;
+      duration_ms: number;
+      attempts: number;
+      error: {
+        kind: KarpathyErrorKind;
+        message: string;
+        exit_code?: number;
+        stdout_tail?: string;
+        last_known_phase?: string;
+      };
+    }
+  | {
+      status: "killed";
+      started_at: number;
+      flipped_at: number;
+      last_known_phase?: string;
+    };
+
+class KarpathyTaggedError extends Error {
+  kind: KarpathyErrorKind;
+  exit_code?: number;
+  stdout_tail?: string;
+  last_known_phase?: string;
+  constructor(
+    kind: KarpathyErrorKind,
+    message: string,
+    extras: { exit_code?: number; stdout_tail?: string; last_known_phase?: string } = {},
+  ) {
+    super(message);
+    this.name = "KarpathyTaggedError";
+    this.kind = kind;
+    this.exit_code = extras.exit_code;
+    this.stdout_tail = extras.stdout_tail;
+    this.last_known_phase = extras.last_known_phase;
+  }
+}
+
+const KARPATHY_STDOUT_CAP = 4096;
+function _stdoutTail(s: string): string {
+  return s.length > KARPATHY_STDOUT_CAP ? s.slice(-KARPATHY_STDOUT_CAP) : s;
+}
+
 // --- JSON extraction (last-line JSON from agent text) -------------------------
 
 function extractLastJson(text: string): unknown | null {
@@ -862,39 +947,129 @@ async function newSession(
 
 // --- Karpathy check via Pi SDK ------------------------------------------------
 
+// Top-level entry point. Always returns a structured KarpathyCheckRecord —
+// never throws, never returns null. Caller persists this record verbatim into
+// runs.karpathy_check (JSONB) so post-mortem debugging works from the DB row
+// alone (no log-grep round-trip). Skipped variants (no key / invalid url) are
+// also returned here so the row distinguishes them from genuine errors.
 export async function runKarpathyCheck(
   prUrl: string,
-): Promise<KarpathyReview | null> {
+): Promise<KarpathyCheckRecord> {
+  const started_at = Date.now() / 1000;
+  const t0 = Date.now();
+
+  const prNum = prNumberFromUrl(prUrl);
+  if (!prNum) {
+    return { status: "skipped", skip_reason: "invalid_pr_url" };
+  }
+
   if (process.env.E2B_API_KEY) {
+    const anthropicKey =
+      process.env.ANTHROPIC_API_KEY ?? process.env.LITELLM_API_KEY;
+    if (!anthropicKey) {
+      return { status: "skipped", skip_reason: "no_anthropic_key" };
+    }
     try {
-      return await _runKarpathyE2B(prUrl);
-    } catch (e) {
-      dbg(`runKarpathyCheck: E2B path threw`, e);
-      return null;
+      const { review, attempts } = await _runKarpathyE2B(prUrl, prNum);
+      const finished_at = Date.now() / 1000;
+      return {
+        status: "ok",
+        started_at,
+        finished_at,
+        duration_ms: Date.now() - t0,
+        attempts,
+        result: review,
+      };
+    } catch (err) {
+      const finished_at = Date.now() / 1000;
+      const tagged =
+        err instanceof KarpathyTaggedError
+          ? err
+          : new KarpathyTaggedError("unknown", String((err as Error)?.message ?? err));
+      dbg(`runKarpathyCheck: E2B path threw kind=${tagged.kind}`, err);
+      return {
+        status: "errored",
+        started_at,
+        finished_at,
+        duration_ms: Date.now() - t0,
+        attempts: 1,
+        error: {
+          kind: tagged.kind,
+          message: tagged.message.slice(0, 1000),
+          ...(tagged.exit_code !== undefined ? { exit_code: tagged.exit_code } : {}),
+          ...(tagged.stdout_tail ? { stdout_tail: tagged.stdout_tail } : {}),
+          ...(tagged.last_known_phase ? { last_known_phase: tagged.last_known_phase } : {}),
+        },
+      };
     }
   }
+
+  // Local-session fallback (no E2B). Same structured-error treatment as the
+  // sandboxed path so the DB row keeps its shape regardless of which backend
+  // ran.
   try {
     const session = await newSession(KARPATHY_SYSTEM);
-    const { output } = await runPrompt(session, `Review this PR: ${prUrl}`);
-    session.dispose?.();
+    let output: string;
+    try {
+      ({ output } = await runPrompt(session, `Review this PR: ${prUrl}`));
+    } finally {
+      session.dispose?.();
+    }
     const raw = extractLastJson(output);
-    if (!raw) return null;
-    return KarpathyReviewSchema.parse(raw);
-  } catch {
-    return null;
+    if (!raw) {
+      throw new KarpathyTaggedError("no_json_in_output", "no JSON in local-session output", {
+        stdout_tail: _stdoutTail(output),
+      });
+    }
+    let review: KarpathyReview;
+    try {
+      review = KarpathyReviewSchema.parse(raw);
+    } catch (zerr) {
+      throw new KarpathyTaggedError(
+        "schema_parse",
+        `zod: ${String((zerr as Error)?.message ?? zerr).slice(0, 300)}`,
+        { stdout_tail: JSON.stringify(raw).slice(-KARPATHY_STDOUT_CAP) },
+      );
+    }
+    const finished_at = Date.now() / 1000;
+    return {
+      status: "ok",
+      started_at,
+      finished_at,
+      duration_ms: Date.now() - t0,
+      attempts: 1,
+      result: review,
+    };
+  } catch (err) {
+    const finished_at = Date.now() / 1000;
+    const tagged =
+      err instanceof KarpathyTaggedError
+        ? err
+        : new KarpathyTaggedError("no_e2b_session", String((err as Error)?.message ?? err));
+    return {
+      status: "errored",
+      started_at,
+      finished_at,
+      duration_ms: Date.now() - t0,
+      attempts: 1,
+      error: {
+        kind: tagged.kind,
+        message: tagged.message.slice(0, 1000),
+        ...(tagged.stdout_tail ? { stdout_tail: tagged.stdout_tail } : {}),
+      },
+    };
   }
 }
 
-async function _runKarpathyE2B(prUrl: string): Promise<KarpathyReview | null> {
-  const prNum = prNumberFromUrl(prUrl);
-  if (!prNum) return null;
-
+async function _runKarpathyE2B(
+  prUrl: string,
+  prNum: number,
+): Promise<{ review: KarpathyReview; attempts: number }> {
   const e2bKey = process.env.E2B_API_KEY!;
   const anthropicKey =
     process.env.ANTHROPIC_API_KEY ?? process.env.LITELLM_API_KEY;
   if (!anthropicKey) {
-    dbg(`_runKarpathyE2B[${prNum}]: no ANTHROPIC_API_KEY or LITELLM_API_KEY`);
-    return null;
+    throw new KarpathyTaggedError("no_anthropic_key", "no ANTHROPIC_API_KEY or LITELLM_API_KEY");
   }
   const anthropicBase =
     process.env.ANTHROPIC_BASE_URL ?? process.env.LITELLM_API_BASE;
@@ -922,24 +1097,35 @@ PR to review: ${prUrl}`;
       await new Promise((r) => setTimeout(r, delay));
     }
     try {
-      return await _runKarpathyE2BSandbox(
+      const review = await _runKarpathyE2BSandbox(
         prNum,
         e2bKey,
         anthropicKey,
         anthropicBase,
         prompt,
       );
+      return { review, attempts: si + 1 };
     } catch (err) {
       const msg = (err as Error).message ?? "";
       const isTimeout =
         msg.includes("deadline_exceeded") ||
         msg.includes("timed out") ||
         msg.includes("timeoutMs");
-      if (!isTimeout || si >= SANDBOX_MAX) throw err;
+      if (!isTimeout || si >= SANDBOX_MAX) {
+        if (isTimeout && si >= SANDBOX_MAX) {
+          const tagged =
+            err instanceof KarpathyTaggedError
+              ? err
+              : new KarpathyTaggedError("claude_timeout_exhausted", msg);
+          (tagged as any).kind = "claude_timeout_exhausted";
+          throw tagged;
+        }
+        throw err;
+      }
       lastErr = err as Error;
     }
   }
-  throw lastErr;
+  throw lastErr ?? new KarpathyTaggedError("unknown", "sandbox loop exhausted");
 }
 
 async function _runKarpathyE2BSandbox(
@@ -948,57 +1134,109 @@ async function _runKarpathyE2BSandbox(
   anthropicKey: string,
   anthropicBase: string | undefined,
   prompt: string,
-): Promise<KarpathyReview | null> {
-  const sandbox = await Sandbox.create("claude", {
-    apiKey: e2bKey,
-    envs: {
-      ANTHROPIC_API_KEY: anthropicKey,
-      ...(anthropicBase ? { ANTHROPIC_BASE_URL: anthropicBase } : {}),
-    },
-    timeoutMs: 600_000,
-  });
+): Promise<KarpathyReview> {
+  let sandbox: Sandbox;
   try {
-    const cloneResult = await sandbox.commands.run(
-      `git clone --depth=50 https://github.com/BerriAI/litellm.git /home/user/repo 2>&1`,
-      { timeoutMs: 120_000 },
+    sandbox = await Sandbox.create("claude", {
+      apiKey: e2bKey,
+      envs: {
+        ANTHROPIC_API_KEY: anthropicKey,
+        ...(anthropicBase ? { ANTHROPIC_BASE_URL: anthropicBase } : {}),
+      },
+      timeoutMs: 600_000,
+    });
+  } catch (e) {
+    throw new KarpathyTaggedError(
+      "sandbox_create",
+      String((e as Error)?.message ?? e).slice(0, 500),
+      { last_known_phase: "sandbox_create" },
     );
+  }
+
+  try {
+    let cloneResult: Awaited<ReturnType<typeof sandbox.commands.run>>;
+    try {
+      cloneResult = await sandbox.commands.run(
+        `git clone --depth=50 https://github.com/BerriAI/litellm.git /home/user/repo 2>&1`,
+        { timeoutMs: 120_000 },
+      );
+    } catch (e) {
+      throw new KarpathyTaggedError(
+        "git_clone",
+        `git clone threw: ${String((e as Error)?.message ?? e).slice(0, 300)}`,
+        { last_known_phase: "git_clone" },
+      );
+    }
     if (cloneResult.exitCode !== 0) {
-      throw new Error(
-        `git clone failed (exit ${cloneResult.exitCode}): ${cloneResult.stdout.slice(0, 300)}`,
+      throw new KarpathyTaggedError(
+        "git_clone",
+        `git clone failed (exit ${cloneResult.exitCode})`,
+        {
+          exit_code: cloneResult.exitCode,
+          stdout_tail: _stdoutTail(cloneResult.stdout ?? ""),
+          last_known_phase: "git_clone",
+        },
       );
     }
 
-    const fetchResult = await sandbox.commands.run(
-      `cd /home/user/repo && git fetch origin pull/${prNum}/head:pr/${prNum} 2>&1`,
-      { timeoutMs: 60_000 },
-    );
-    if (fetchResult.exitCode !== 0) {
-      dbg(
-        `_runKarpathyE2BSandbox[${prNum}]: fetch warning: ${fetchResult.stdout.slice(0, 200)}`,
+    let fetchWarning: string | null = null;
+    try {
+      const fetchResult = await sandbox.commands.run(
+        `cd /home/user/repo && git fetch origin pull/${prNum}/head:pr/${prNum} 2>&1`,
+        { timeoutMs: 60_000 },
       );
+      if (fetchResult.exitCode !== 0) {
+        fetchWarning = _stdoutTail(fetchResult.stdout ?? "");
+        dbg(
+          `_runKarpathyE2BSandbox[${prNum}]: fetch warning: ${(fetchResult.stdout ?? "").slice(0, 200)}`,
+        );
+      }
+    } catch (e) {
+      fetchWarning = String((e as Error)?.message ?? e).slice(0, 500);
+      dbg(`_runKarpathyE2BSandbox[${prNum}]: fetch threw: ${fetchWarning}`);
     }
 
-    await sandbox.files.write("/tmp/karpathy_prompt.txt", prompt);
+    try {
+      await sandbox.files.write("/tmp/karpathy_prompt.txt", prompt);
+    } catch (e) {
+      throw new KarpathyTaggedError(
+        "files_write",
+        `prompt file write failed: ${String((e as Error)?.message ?? e).slice(0, 300)}`,
+        { last_known_phase: "files_write" },
+      );
+    }
 
     const MAX_403 = 2;
     let claudeResult: Awaited<ReturnType<typeof sandbox.commands.run>>;
+    let capturedOutput = "";
     let attempt = 0;
+    let saw403 = false;
     while (true) {
-      let capturedOutput = "";
-      claudeResult = await sandbox.commands.run(
-        `cd /home/user/repo && claude --dangerously-skip-permissions -p "$(cat /tmp/karpathy_prompt.txt)"`,
-        {
-          timeoutMs: 600_000,
-          onStdout: (data: string) => {
-            capturedOutput += data;
+      capturedOutput = "";
+      try {
+        claudeResult = await sandbox.commands.run(
+          `cd /home/user/repo && claude --dangerously-skip-permissions -p "$(cat /tmp/karpathy_prompt.txt)"`,
+          {
+            timeoutMs: 600_000,
+            onStdout: (data: string) => {
+              capturedOutput += data;
+            },
+            onStderr: (data: string) => {
+              capturedOutput += data;
+            },
           },
-          onStderr: (data: string) => {
-            capturedOutput += data;
-          },
-        },
-      );
+        );
+      } catch (e) {
+        const msg = String((e as Error)?.message ?? e);
+        throw new KarpathyTaggedError(
+          msg.includes("timed out") || msg.includes("deadline_exceeded") ? "claude_timeout_exhausted" : "claude_exec_nonzero",
+          `claude exec threw: ${msg.slice(0, 300)}`,
+          { stdout_tail: _stdoutTail(capturedOutput), last_known_phase: "claude_exec" },
+        );
+      }
       const is403 =
         claudeResult.exitCode !== 0 && capturedOutput.includes("403");
+      if (is403) saw403 = true;
       if (!is403 || attempt >= MAX_403) break;
       attempt++;
       dbg(`_runKarpathyE2BSandbox[${prNum}]: 403 — retry ${attempt}/${MAX_403}`);
@@ -1008,11 +1246,48 @@ async function _runKarpathyE2BSandbox(
     dbg(
       `_runKarpathyE2BSandbox[${prNum}]: claude exit ${claudeResult.exitCode}`,
     );
+
+    if (claudeResult.exitCode !== 0) {
+      throw new KarpathyTaggedError(
+        saw403 ? "claude_403_exhausted" : "claude_exec_nonzero",
+        `claude exit ${claudeResult.exitCode}${saw403 ? " (403 retries exhausted)" : ""}`,
+        {
+          exit_code: claudeResult.exitCode,
+          stdout_tail: _stdoutTail(capturedOutput),
+          last_known_phase: fetchWarning ? "git_fetch_warning + claude_exec" : "claude_exec",
+        },
+      );
+    }
+
     const raw = extractLastJson(claudeResult.stdout);
-    if (!raw) return null;
-    return KarpathyReviewSchema.parse(raw);
+    if (!raw) {
+      throw new KarpathyTaggedError(
+        "no_json_in_output",
+        "claude produced no parseable JSON",
+        {
+          stdout_tail: _stdoutTail(claudeResult.stdout ?? capturedOutput),
+          last_known_phase: "extract_json",
+        },
+      );
+    }
+    try {
+      return KarpathyReviewSchema.parse(raw);
+    } catch (zerr) {
+      throw new KarpathyTaggedError(
+        "schema_parse",
+        `zod: ${String((zerr as Error)?.message ?? zerr).slice(0, 300)}`,
+        {
+          stdout_tail: JSON.stringify(raw).slice(-KARPATHY_STDOUT_CAP),
+          last_known_phase: "schema_parse",
+        },
+      );
+    }
   } finally {
-    await sandbox.kill();
+    try {
+      await sandbox.kill();
+    } catch {
+      /* swallow — finally cleanup, sandbox may already be gone */
+    }
   }
 }
 
@@ -1059,27 +1334,36 @@ function isWideLowDensityFanout(t: TriageReport): boolean {
   return total / t.files_changed < 5;
 }
 
-function karpathyPenalty(k: KarpathyReview | null): [number, string | null] {
-  if (!k) return [0, null];
+// Returns the KarpathyReview payload only when the check successfully
+// produced one. Skipped/errored/killed/running records contribute no
+// penalty — same neutral behavior as the previous `null` sentinel.
+function karpathyResult(k: KarpathyCheckRecord | null): KarpathyReview | null {
+  if (!k) return null;
+  return k.status === "ok" ? k.result : null;
+}
+
+function karpathyPenalty(k: KarpathyCheckRecord | null): [number, string | null] {
+  const r = karpathyResult(k);
+  if (!r) return [0, null];
   const weights: Record<KarpathyReview["decision"], number> = {
     merge: 0,
     block: 5,
     needs_human: 2,
   };
-  const w = weights[k.decision] ?? 0;
+  const w = weights[r.decision] ?? 0;
   if (!w) return [0, null];
-  const br0 = k.blocking_reasons[0];
+  const br0 = r.blocking_reasons[0];
   const liner = (br0?.explanation ?? "").trim().replace(/\.$/, "");
   const label = liner
-    ? `karpathy ${k.decision} — ${liner}`
-    : `karpathy ${k.decision}`;
+    ? `karpathy ${r.decision} — ${liner}`
+    : `karpathy ${r.decision}`;
   return [w, label];
 }
 
 export function fuse(
   t: TriageReport,
   p: PatternReport,
-  k: KarpathyReview | null = null,
+  k: KarpathyCheckRecord | null = null,
 ): TriageCard {
   type RubricRow = [
     number,
@@ -1220,8 +1504,9 @@ function composeOneLiner(
   penalties: string[],
   t: TriageReport,
   p: PatternReport,
-  k: KarpathyReview | null,
+  kr: KarpathyCheckRecord | null,
 ): string {
+  const k = karpathyResult(kr);
   if (verdict === "WAITING")
     return `${plural(t.running_checks.length, "check")} still running: ${join(t.running_checks)}.`;
   if (verdict === "READY") return "Ready to ship.";
@@ -1319,8 +1604,9 @@ export function renderFallbackCard(prUrl: string, error: string): string {
 export function renderDrilldown(
   t: TriageReport,
   p: PatternReport,
-  k: KarpathyReview | null = null,
+  kr: KarpathyCheckRecord | null = null,
 ): string {
+  const k = karpathyResult(kr);
   const lines = ["*Drill-down*"];
   if (t.has_merge_conflicts === true) {
     lines.push(
@@ -2172,7 +2458,13 @@ export async function reviewPr(
       [triageErr, patternErr].filter(Boolean).join("\n") ||
       "unknown agent failure";
     const card = renderFallbackCard(prUrl, err);
-    log("karpathy check: failed");
+    log("karpathy: skipped — triage/pattern failed");
+    const earlyKarpathy: KarpathyCheckRecord = {
+      status: "skipped",
+      skip_reason: "provisional_not_ready",
+      provisional_verdict: "BLOCKED",
+      provisional_score: 0,
+    };
     await db
       .insertRun({
         run_id: runId,
@@ -2190,7 +2482,7 @@ export async function reviewPr(
         pattern: null,
         card: null,
         messages: { triage: [], pattern: [] },
-        karpathy_check: {},
+        karpathy_check: earlyKarpathy,
       })
       .catch(() => {});
     return { card, drilldown: "", runId, toolTrace: allTrace };
@@ -2198,26 +2490,83 @@ export async function reviewPr(
 
   log("starting provisional fuse");
 
-  // Karpathy runs only when triage+pattern would READY
+  // Karpathy runs only when triage+pattern would READY. We persist the
+  // outcome as a structured record (KarpathyCheckRecord) into runs.karpathy_check
+  // so post-mortem debugging works from the DB row alone — no log-grep
+  // round-trip. Three-phase orchestration:
+  //
+  //   A) decide skip/run, persist a "running" or "skipped" row BEFORE the
+  //      karpathy await — this is the breadcrumb that survives if the process
+  //      is killed mid-flight (Render redeploy, OOM, SIGTERM)
+  //   B) run karpathy if applicable; the helper itself never throws
+  //   C) recompute duration_s, append karpathy events to tool_trace, upsert
+  //      the run row with the final record
   const provisional = fuse(triage, pattern);
-  let karpathy: KarpathyReview | null = null;
   log(`provisional verdict: ${JSON.stringify(provisional)}`);
+
+  let karpathyCheck: KarpathyCheckRecord;
   if (provisional.verdict === "READY") {
-    log("karpathy check: running");
-    const kT0 = Date.now();
-    karpathy = await runKarpathyCheck(prUrl).catch((e) => {
-      dbg(`reviewPr: karpathy check threw`, e);
-      return null;
-    });
-    dbg(
-      `reviewPr: karpathy check returned in ${Date.now() - kT0}ms result=${karpathy ? "ok" : "null"}`,
-    );
+    karpathyCheck = { status: "running", started_at: Date.now() / 1000 };
+    log("karpathy: running");
+  } else {
+    karpathyCheck = {
+      status: "skipped",
+      skip_reason: "provisional_not_ready",
+      provisional_verdict: provisional.verdict,
+      provisional_score: provisional.score,
+    };
+    log(`karpathy: skipped — provisional ${provisional.verdict}`);
   }
 
+  // PHASE A: pre-write the run row with the current karpathy state. Uses
+  // the existing ON CONFLICT DO UPDATE (db.ts) so the post-karpathy upsert
+  // in Phase C overwrites this row in place.
+  const phaseACard = fuse(triage, pattern, null);
+  await db
+    .insertRun({
+      run_id: runId,
+      ts: Date.now() / 1000,
+      pr_url: prUrl,
+      pr_number: triage?.pr_number ?? null,
+      pr_title: triage?.pr_title ?? null,
+      pr_author: triage?.pr_author ?? null,
+      source,
+      channel: opts.channel ?? null,
+      thread_ts: opts.threadTs ?? null,
+      duration_s: (Date.now() - t0) / 1000,
+      tool_trace: allTrace,
+      triage,
+      pattern,
+      card: phaseACard,
+      messages: { triage: [], pattern: [] },
+      karpathy_check: karpathyCheck,
+    })
+    .catch((e) => {
+      dbg(`reviewPr: phase-A insertRun failed`, e);
+    });
+
+  // PHASE B: actual karpathy invocation. runKarpathyCheck never throws —
+  // every failure path is reified into the returned KarpathyCheckRecord.
+  if (karpathyCheck.status === "running") {
+    const kT0 = Date.now();
+    karpathyCheck = await runKarpathyCheck(prUrl);
+    dbg(
+      `reviewPr: karpathy returned in ${Date.now() - kT0}ms status=${karpathyCheck.status}`,
+    );
+    if (karpathyCheck.status === "ok") {
+      log(`karpathy: ok — decision ${karpathyCheck.result.decision}`);
+    } else if (karpathyCheck.status === "errored") {
+      log(`karpathy: errored — ${karpathyCheck.error.kind}`);
+    }
+  }
+
+  // PHASE C: build final card + drilldown from the resolved record, append
+  // karpathy events to the tool trace (existing snapshot was taken before
+  // karpathy ran), and recompute duration_s so the DB shows real wall time.
   dbg(`reviewPr: building final card + drilldown`);
-  const card = fuse(triage, pattern, karpathy);
+  const card = fuse(triage, pattern, karpathyCheck);
   const cardText = renderCard(card);
-  let drilldown = renderDrilldown(triage, pattern, karpathy);
+  let drilldown = renderDrilldown(triage, pattern, karpathyCheck);
   if (triagePlainAppend) {
     drilldown +=
       "\n\n_Triage agent output (no JSON; verbatim)_\n\n" + triagePlainAppend;
@@ -2227,8 +2576,30 @@ export async function reviewPr(
       "\n\n_Pattern agent output (no JSON; verbatim)_\n\n" + patternPlainAppend;
   }
 
+  // Append karpathy entries to the tool trace so the LLM debugger sees the
+  // invocation in the same place as the other tool calls. For skipped runs
+  // we still emit a synthetic call/result pair so absence is explicit.
+  const karpathyTracePreview =
+    karpathyCheck.status === "ok"
+      ? `decision=${karpathyCheck.result.decision} attempts=${karpathyCheck.attempts} duration_ms=${karpathyCheck.duration_ms}`
+      : karpathyCheck.status === "errored"
+        ? `errored kind=${karpathyCheck.error.kind}${karpathyCheck.error.exit_code !== undefined ? ` exit=${karpathyCheck.error.exit_code}` : ""}`
+        : karpathyCheck.status === "skipped"
+          ? `skipped reason=${karpathyCheck.skip_reason}`
+          : karpathyCheck.status;
+  allTrace.push(
+    { kind: "call", tool: "karpathy_check", args: { pr_url: prUrl } },
+    {
+      kind: "result",
+      tool: "karpathy_check",
+      isError: karpathyCheck.status !== "ok",
+      preview: karpathyTracePreview,
+    },
+  );
+
   log(`card: ${JSON.stringify(card)}`);
 
+  const finalDuration = (Date.now() - t0) / 1000;
   dbg(`reviewPr: about to insertRun`);
   await db
     .insertRun({
@@ -2241,13 +2612,13 @@ export async function reviewPr(
       source,
       channel: opts.channel ?? null,
       thread_ts: opts.threadTs ?? null,
-      duration_s: duration,
+      duration_s: finalDuration,
       tool_trace: allTrace,
       triage: triage,
       pattern: pattern,
       card: card,
       messages: { triage: [], pattern: [] },
-      karpathy_check: karpathy ?? {},
+      karpathy_check: karpathyCheck,
     })
     .catch((e) => {
       dbg(`reviewPr: insertRun failed`, e);

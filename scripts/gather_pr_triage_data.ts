@@ -42,6 +42,18 @@ export function isGreptileBotUser(u: unknown): boolean {
   const obj = u as { login?: unknown; type?: unknown };
   return obj.login === GREPTILE_BOT_LOGIN && obj.type === "Bot";
 }
+// GitHub App slug for the Greptile bot. Check-runs are posted via app
+// installation auth and cannot be edited by anyone except the app that
+// created them, so a score parsed from a Greptile check-run output is
+// the only source we trust without further verification. PR comments
+// and review bodies, in contrast, are editable by anyone with write
+// access — see _scoreFromGreptileComments below.
+export const GREPTILE_BOT_APP_SLUG = "greptile-apps";
+export function isGreptileBotApp(a: unknown): boolean {
+  if (!a || typeof a !== "object") return false;
+  const obj = a as { slug?: unknown };
+  return obj.slug === GREPTILE_BOT_APP_SLUG;
+}
 const _GREPTILE_SCORE_RE = /confidence\s*score[^0-9]{0,10}([1-5])\s*\/\s*5/i;
 const _GREPTILE_SCORE_FALLBACK_RE = /\b([1-5])\s*\/\s*5\b/;
 const _CIRCLECI_NAME_RE = /(^|\/)circleci(\s*[:/]|\b)/i;
@@ -494,48 +506,89 @@ async function _fetchOtherOpenPrs(
   return pulls.filter((p: any) => p.number !== excludePr).slice(0, n);
 }
 
-async function _fetchGreptileScore(
+function _parseGreptileScore(text: string): number | null {
+  if (!text) return null;
+  const m = _GREPTILE_SCORE_RE.exec(text) ?? _GREPTILE_SCORE_FALLBACK_RE.exec(text);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// Trusted source: Greptile check-runs. App installation auth means only
+// the Greptile app can write/update these, so the score in the run output
+// cannot be forged by editing a comment.
+export function _scoreFromGreptileCheckRun(checks: any[]): number | null {
+  const greptileRuns = (checks ?? []).filter((r) => isGreptileBotApp(r?.app));
+  greptileRuns.sort((a, b) => {
+    const at = a?.completed_at ?? a?.started_at ?? "";
+    const bt = b?.completed_at ?? b?.started_at ?? "";
+    return at < bt ? 1 : at > bt ? -1 : 0;
+  });
+  for (const r of greptileRuns) {
+    const out = r?.output ?? {};
+    const text = [out.title, out.summary, out.text]
+      .filter((x) => typeof x === "string")
+      .join("\n");
+    const s = _parseGreptileScore(text);
+    if (s !== null) return s;
+  }
+  return null;
+}
+
+// Fallback source: issue comments authored by the Greptile bot. Anyone
+// with write access on the PR can edit a comment body and forge a 5/5
+// score; the GitHub REST API does not expose the editor's identity. We
+// therefore reject any comment whose updated_at differs from created_at
+// (i.e. has been edited at all). Bot self-edits are also rejected — the
+// safer default — since the trusted check-run path will normally cover
+// the legitimate score and this fallback is best-effort. PR review
+// bodies are not used at all because REST exposes no edit signal for
+// them.
+export function _scoreFromGreptileCommentList(comments: any[]): number | null {
+  const candidates: Array<[string, string]> = [];
+  for (const c of comments ?? []) {
+    if (!isGreptileBotUser(c?.user)) continue;
+    const created = c?.created_at ?? "";
+    const updated = c?.updated_at ?? "";
+    // Any edit ⇒ untrusted, since REST does not name the editor.
+    if (updated && created && updated !== created) continue;
+    candidates.push([created, c.body ?? ""]);
+  }
+  candidates.sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0));
+  for (const [, body] of candidates) {
+    const s = _parseGreptileScore(body);
+    if (s !== null) return s;
+  }
+  return null;
+}
+
+async function _scoreFromGreptileComments(
   mcp: _LiteLLMMcp,
   owner: string,
   repo: string,
   prNumber: number,
 ): Promise<number | null> {
-  let reviews: any[];
   let comments: any[];
   try {
-    [reviews, comments] = await Promise.all([
-      mcp.ghList("github_openapi_mcp-pulls/list-reviews", {
-        owner,
-        repo,
-        pull_number: prNumber,
-      }),
-      mcp.ghList("github_openapi_mcp-issues/list-comments", {
-        owner,
-        repo,
-        issue_number: prNumber,
-      }),
-    ]);
+    comments = await mcp.ghList("github_openapi_mcp-issues/list-comments", {
+      owner,
+      repo,
+      issue_number: prNumber,
+    });
   } catch {
     return null;
   }
+  return _scoreFromGreptileCommentList(comments);
+}
 
-  const candidates: Array<[string, string]> = [];
-  for (const r of reviews ?? []) {
-    if (isGreptileBotUser(r?.user)) {
-      candidates.push([r.submitted_at ?? "", r.body ?? ""]);
-    }
-  }
-  for (const c of comments ?? []) {
-    if (isGreptileBotUser(c?.user)) {
-      candidates.push([c.created_at ?? "", c.body ?? ""]);
-    }
-  }
-  candidates.sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0));
-  for (const [, body] of candidates) {
-    const m = _GREPTILE_SCORE_RE.exec(body) ?? _GREPTILE_SCORE_FALLBACK_RE.exec(body);
-    if (m) return parseInt(m[1], 10);
-  }
-  return null;
+async function _fetchGreptileScore(
+  mcp: _LiteLLMMcp,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  ownChecks: any[],
+): Promise<number | null> {
+  const fromCheck = _scoreFromGreptileCheckRun(ownChecks);
+  if (fromCheck !== null) return fromCheck;
+  return await _scoreFromGreptileComments(mcp, owner, repo, prNumber);
 }
 
 // --------------------------------------------------------------------------- //
@@ -564,17 +617,38 @@ async function _fetchPrWithMergeable(
   return pr;
 }
 
+async function _fetchAllComments(
+  mcp: _LiteLLMMcp,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<string[]> {
+  try {
+    const comments = await mcp.ghList("github_openapi_mcp-issues/list-comments", {
+      owner,
+      repo,
+      issue_number: prNumber,
+    });
+    if (!Array.isArray(comments)) return [];
+    return comments
+      .map((c: any) => (typeof c?.body === "string" ? c.body : ""))
+      .filter((b: string) => b.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 async function gather(
   owner: string,
   repo: string,
   prNumber: number,
   mcp: _LiteLLMMcp,
 ): Promise<Record<string, unknown>> {
-  const [pr, diffFiles, otherPrs, greptileScore] = await Promise.all([
+  const [pr, diffFiles, otherPrs, prComments] = await Promise.all([
     _fetchPrWithMergeable(mcp, owner, repo, prNumber),
     _fetchDiff(mcp, owner, repo, prNumber),
     _fetchOtherOpenPrs(mcp, owner, repo, prNumber, OTHER_PRS_SAMPLE_SIZE),
-    _fetchGreptileScore(mcp, owner, repo, prNumber),
+    _fetchAllComments(mcp, owner, repo, prNumber),
   ]);
   const headSha = pr.head.sha;
 
@@ -592,6 +666,13 @@ async function gather(
   const allChecksResults = await Promise.all([ownChecksTask, ...otherChecksTasks]);
   const ownChecks = allChecksResults[0];
   const otherChecks = allChecksResults.slice(1);
+
+  // Greptile score must be derived from a tamper-resistant source. The
+  // Greptile bot posts its summary as a check-run (signed by app
+  // installation auth, immutable to non-app actors); we prefer that over
+  // PR comments, which any contributor with write access can edit to
+  // forge a high score.
+  const greptileScore = await _fetchGreptileScore(mcp, owner, repo, prNumber, ownChecks);
 
   const passing: string[] = [];
   const inProgress: string[] = [];
@@ -668,12 +749,21 @@ async function gather(
     });
   }
 
+  const prLabels: string[] = Array.isArray(pr.labels)
+    ? pr.labels
+        .map((l: any) => (typeof l?.name === "string" ? l.name : ""))
+        .filter((s: string) => s.length > 0)
+    : [];
+
   return {
     owner,
     repo,
     pr_number: prNumber,
     pr_title: pr.title ?? "",
     pr_author: pr.user?.login ?? "",
+    pr_body: typeof pr.body === "string" ? pr.body : "",
+    pr_labels: prLabels,
+    pr_comments: prComments,
     head_sha: headSha,
     passing_checks: passing,
     in_progress_checks: inProgress,

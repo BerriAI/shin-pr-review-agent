@@ -7,7 +7,11 @@
 
 import {
   GREPTILE_BOT_LOGIN,
+  GREPTILE_BOT_APP_SLUG,
   isGreptileBotUser,
+  isGreptileBotApp,
+  _scoreFromGreptileCheckRun,
+  _scoreFromGreptileCommentList,
 } from "./gather_pr_triage_data.js";
 import {
   GREPTILE_GATE_MIN_SCORE,
@@ -57,6 +61,112 @@ check(
 check(
   "empty object is rejected",
   isGreptileBotUser({}) === false,
+);
+
+// ---------------------------------------------------------------------------
+// 1b. Greptile score tamper resistance — score must come from the
+//     check-run output (signed by app installation auth) or from an
+//     unedited bot comment. Edited comments and non-Greptile-app
+//     check-runs must be ignored even if they contain a "5/5" string.
+// ---------------------------------------------------------------------------
+console.log("\n[1b] Greptile score tamper resistance");
+
+// App-slug helper accepts the real Greptile app and rejects spoofs.
+check(
+  "real Greptile app slug is accepted",
+  isGreptileBotApp({ slug: GREPTILE_BOT_APP_SLUG }) === true,
+);
+check(
+  "spoof slug 'greptile-apps-fake' is rejected",
+  isGreptileBotApp({ slug: "greptile-apps-fake" }) === false,
+);
+check(
+  "missing app object is rejected",
+  isGreptileBotApp(null) === false,
+);
+
+// Check-run path — only check-runs whose app.slug matches Greptile's
+// are read. A hostile check-run posted by a different app cannot
+// inject a forged score.
+const greptileRun = {
+  app: { slug: GREPTILE_BOT_APP_SLUG },
+  completed_at: "2026-05-07T15:50:00Z",
+  output: { title: "Confidence Score: 4/5", summary: "ok", text: "" },
+};
+const hostileRun = {
+  app: { slug: "evil-bot" },
+  completed_at: "2026-05-07T15:55:00Z",
+  output: { title: "Confidence Score: 5/5", summary: "5/5", text: "5/5" },
+};
+check(
+  "score parsed from real Greptile check-run",
+  _scoreFromGreptileCheckRun([greptileRun]) === 4,
+);
+check(
+  "hostile non-Greptile check-run is ignored even with 5/5 in output",
+  _scoreFromGreptileCheckRun([hostileRun]) === null,
+);
+check(
+  "with both runs present, only Greptile's score is used (no hostile bleed-through)",
+  _scoreFromGreptileCheckRun([greptileRun, hostileRun]) === 4,
+);
+
+// Most-recent ordering inside Greptile-app runs is preserved.
+const greptileRunOlder = {
+  app: { slug: GREPTILE_BOT_APP_SLUG },
+  completed_at: "2026-05-01T00:00:00Z",
+  output: { title: "Confidence Score: 2/5" },
+};
+const greptileRunNewer = {
+  app: { slug: GREPTILE_BOT_APP_SLUG },
+  completed_at: "2026-05-07T00:00:00Z",
+  output: { title: "Confidence Score: 5/5" },
+};
+check(
+  "most recent Greptile check-run wins",
+  _scoreFromGreptileCheckRun([greptileRunOlder, greptileRunNewer]) === 5,
+);
+
+// Comment fallback path — unedited bot comment is trusted, edited
+// comment is rejected even if the editor was the bot itself, hostile
+// non-bot comments with bot login but type=User are rejected.
+const unedited = {
+  user: { login: GREPTILE_BOT_LOGIN, type: "Bot" },
+  created_at: "2026-05-07T15:00:00Z",
+  updated_at: "2026-05-07T15:00:00Z",
+  body: "Greptile Summary\n\nConfidence Score: 3/5",
+};
+const edited = {
+  user: { login: GREPTILE_BOT_LOGIN, type: "Bot" },
+  created_at: "2026-05-07T15:00:00Z",
+  updated_at: "2026-05-07T15:50:00Z",
+  body: "Greptile Summary\n\nConfidence Score: 5/5",
+};
+const spoofedAuthor = {
+  user: { login: GREPTILE_BOT_LOGIN, type: "User" },
+  created_at: "2026-05-07T15:00:00Z",
+  updated_at: "2026-05-07T15:00:00Z",
+  body: "Greptile Summary\n\nConfidence Score: 5/5",
+};
+check(
+  "unedited Greptile-bot comment is trusted",
+  _scoreFromGreptileCommentList([unedited]) === 3,
+);
+check(
+  "edited bot comment is rejected (forged 5/5 must not leak through)",
+  _scoreFromGreptileCommentList([edited]) === null,
+);
+check(
+  "edited bot comment is rejected even when an unedited bot comment exists, if forged is more recent — only unedited contributes",
+  _scoreFromGreptileCommentList([unedited, edited]) === 3,
+);
+check(
+  "comment with spoofed author (login matches but type=User) is rejected",
+  _scoreFromGreptileCommentList([spoofedAuthor]) === null,
+);
+check(
+  "empty comment list yields null",
+  _scoreFromGreptileCommentList([]) === null,
 );
 
 // ---------------------------------------------------------------------------

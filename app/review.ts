@@ -20,6 +20,7 @@ import {
 } from "@arizeai/openinference-semantic-conventions";
 import { z } from "zod";
 import * as db from "./db.js";
+import { mintInstallationTokenForOwner } from "./github_app.js";
 
 // --- Auto-merge hook ----------------------------------------------------------
 // server.ts registers this at startup. Fires from reviewPr for every READY
@@ -1345,6 +1346,11 @@ export function renderDrilldown(
 // --- Core review orchestration ------------------------------------------------
 
 const PR_NUMBER_RE = /\/pull\/(\d+)/;
+const PR_OWNER_REPO_RE = /github\.com\/([^/]+)\/([^/]+)\/pull\/\d+/;
+function prOwnerFromUrl(url: string): string | null {
+  const m = PR_OWNER_REPO_RE.exec(url);
+  return m ? m[1] : null;
+}
 
 function prNumberFromUrl(url: string): number | null {
   const m = PR_NUMBER_RE.exec(url);
@@ -1366,13 +1372,14 @@ function _runGatherLocal(
   log: (m: string) => void,
   scriptPath: string = PATTERN_GATHER_SCRIPT,
   label: string = "pattern",
+  extraEnv: Record<string, string> = {},
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
     log(`${label}: running local gather`);
     dbg(`_runGatherLocal[${label}]: spawning npx tsx ${scriptPath} ${prUrl}`);
     const child = spawn("npx", ["tsx", scriptPath, prUrl], {
-      env: { ...process.env },
+      env: { ...process.env, ...extraEnv },
     });
     let stdout = "";
     let stderr = "";
@@ -1805,11 +1812,32 @@ export async function reviewPr(
       const triageT0 = Date.now();
       try {
         log("triage: running gather");
+        // Mint a short-lived installation token for the PR's owner so the
+        // gather subprocess can hit GitHub GraphQL and verify greptile
+        // bot self-edits. Falls back to whatever GITHUB_TOKEN is already
+        // in process.env (or none) if app auth isn't configured.
+        const owner = prOwnerFromUrl(prUrl);
+        const minted = owner
+          ? await mintInstallationTokenForOwner(owner)
+          : null;
+        const extraEnv: Record<string, string> = minted
+          ? { GITHUB_TOKEN: minted }
+          : {};
+        if (minted) {
+          dbg(
+            `triage: minted installation token for owner=${owner} (len=${minted.length}) for gather GraphQL probe`,
+          );
+        } else {
+          dbg(
+            `triage: no installation token minted (owner=${owner ?? "?"} app_auth=${!!process.env.GITHUB_APP_ID && !!process.env.GITHUB_APP_PRIVATE_KEY}); gather will fall back to strict comment-edit reject`,
+          );
+        }
         const gatherData = await _runGatherLocal(
           prUrl,
           log,
           GATHER_SCRIPT,
           "triage",
+          extraEnv,
         );
         // Greptile gate: skip the LLM entirely when Greptile hasn't rated the
         // PR ≥ MIN_SCORE. Saves cost on drive-by PRs and removes the prompt-

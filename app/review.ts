@@ -19,7 +19,6 @@ import {
   SemanticConventions,
 } from "@arizeai/openinference-semantic-conventions";
 import { z } from "zod";
-import { Sandbox } from "e2b";
 import * as db from "./db.js";
 
 // --- Auto-merge hook ----------------------------------------------------------
@@ -42,18 +41,6 @@ const PATTERN_GATHER_SCRIPT = resolve(
   __dirname,
   "../scripts/gather_pattern_local.ts",
 );
-const PATTERN_GATHER_E2B_SCRIPT = resolve(
-  __dirname,
-  "../scripts/gather_pattern_e2b.ts",
-);
-
-// Use e2b sandbox for pattern gather when E2B_API_KEY is set; fall back to
-// local clone otherwise.
-function _activePatternGatherScript(): string {
-  return process.env.E2B_API_KEY
-    ? PATTERN_GATHER_E2B_SCRIPT
-    : PATTERN_GATHER_SCRIPT;
-}
 
 // --- Debug logger -------------------------------------------------------------
 // Prefix every line with [debug] + ms-since-process-start + tag, so every print
@@ -97,7 +84,6 @@ function envForward(): Record<string, string> {
     "LITELLM_API_BASE",
     "LITELLM_API_KEY",
     "GITHUB_TOKEN",
-    "ANTHROPIC_API_KEY",
   ]) {
     const v = process.env[k];
     if (v) out[k] = v;
@@ -652,6 +638,9 @@ export type KarpathyReview = z.infer<typeof KarpathyReviewSchema>;
 // the old `KarpathyReview | null` storage which collapsed skipped/errored/
 // killed/ran-empty into the same `{}` and made post-hoc debugging impossible.
 // All fields beyond `status` are optional so future variants stay compatible.
+// Old E2B-era values (sandbox_create, git_clone, ...) are retained because
+// historical karpathy_check rows in the DB carry them. Live code only emits
+// cursor_agent_error / no_json_in_output / schema_parse now.
 export type KarpathyErrorKind =
   | "sandbox_create"
   | "git_clone"
@@ -664,6 +653,7 @@ export type KarpathyErrorKind =
   | "schema_parse"
   | "no_e2b_session"
   | "no_anthropic_key"
+  | "cursor_agent_error"
   | "unknown";
 
 export type KarpathySkipReason =
@@ -808,58 +798,22 @@ export async function runKarpathyCheck(
     return { status: "skipped", skip_reason: "invalid_pr_url" };
   }
 
-  if (process.env.E2B_API_KEY) {
-    const anthropicKey =
-      process.env.ANTHROPIC_API_KEY ?? process.env.LITELLM_API_KEY;
-    if (!anthropicKey) {
-      return { status: "skipped", skip_reason: "no_anthropic_key" };
-    }
-    try {
-      const { review, attempts } = await _runKarpathyE2B(prUrl, prNum);
-      const finished_at = Date.now() / 1000;
-      return {
-        status: "ok",
-        started_at,
-        finished_at,
-        duration_ms: Date.now() - t0,
-        attempts,
-        result: review,
-      };
-    } catch (err) {
-      const finished_at = Date.now() / 1000;
-      const tagged =
-        err instanceof KarpathyTaggedError
-          ? err
-          : new KarpathyTaggedError("unknown", String((err as Error)?.message ?? err));
-      dbg(`runKarpathyCheck: E2B path threw kind=${tagged.kind}`, err);
-      return {
-        status: "errored",
-        started_at,
-        finished_at,
-        duration_ms: Date.now() - t0,
-        attempts: 1,
-        error: {
-          kind: tagged.kind,
-          message: tagged.message.slice(0, 1000),
-          ...(tagged.exit_code !== undefined ? { exit_code: tagged.exit_code } : {}),
-          ...(tagged.stdout_tail ? { stdout_tail: tagged.stdout_tail } : {}),
-          ...(tagged.last_known_phase ? { last_known_phase: tagged.last_known_phase } : {}),
-        },
-      };
-    }
-  }
-
-  // Local-session fallback (no E2B). Same structured-error treatment as the
-  // sandboxed path so the DB row keeps its shape regardless of which backend
-  // ran.
+  // Karpathy runs as a cursor cloud agent: it gets a freshly-cloned repo and
+  // a real shell, which is what the skill assumes (it greps the diff, reads
+  // referenced files, runs git for context). No E2B, no local subprocess —
+  // the cloud agent IS the sandbox. KarpathyTaggedError preserves the same
+  // {kind, stdout_tail, last_known_phase} contract the DB column expects so
+  // post-mortem queries don't need to special-case the routing change.
   try {
     const session = await newSession(KARPATHY_SYSTEM);
     const { output } = await runPrompt(session, `Review this PR: ${prUrl}`);
     const raw = extractLastJson(output);
     if (!raw) {
-      throw new KarpathyTaggedError("no_json_in_output", "no JSON in local-session output", {
-        stdout_tail: _stdoutTail(output),
-      });
+      throw new KarpathyTaggedError(
+        "no_json_in_output",
+        "no JSON in cursor agent output",
+        { stdout_tail: _stdoutTail(output), last_known_phase: "extract_json" },
+      );
     }
     let review: KarpathyReview;
     try {
@@ -868,7 +822,10 @@ export async function runKarpathyCheck(
       throw new KarpathyTaggedError(
         "schema_parse",
         `zod: ${String((zerr as Error)?.message ?? zerr).slice(0, 300)}`,
-        { stdout_tail: JSON.stringify(raw).slice(-KARPATHY_STDOUT_CAP) },
+        {
+          stdout_tail: JSON.stringify(raw).slice(-KARPATHY_STDOUT_CAP),
+          last_known_phase: "schema_parse",
+        },
       );
     }
     const finished_at = Date.now() / 1000;
@@ -885,7 +842,10 @@ export async function runKarpathyCheck(
     const tagged =
       err instanceof KarpathyTaggedError
         ? err
-        : new KarpathyTaggedError("no_e2b_session", String((err as Error)?.message ?? err));
+        : new KarpathyTaggedError(
+            "cursor_agent_error",
+            String((err as Error)?.message ?? err),
+          );
     return {
       status: "errored",
       started_at,
@@ -896,240 +856,14 @@ export async function runKarpathyCheck(
         kind: tagged.kind,
         message: tagged.message.slice(0, 1000),
         ...(tagged.stdout_tail ? { stdout_tail: tagged.stdout_tail } : {}),
+        ...(tagged.last_known_phase
+          ? { last_known_phase: tagged.last_known_phase }
+          : {}),
       },
     };
   }
 }
 
-async function _runKarpathyE2B(
-  prUrl: string,
-  prNum: number,
-): Promise<{ review: KarpathyReview; attempts: number }> {
-  const e2bKey = process.env.E2B_API_KEY!;
-  const anthropicKey =
-    process.env.ANTHROPIC_API_KEY ?? process.env.LITELLM_API_KEY;
-  if (!anthropicKey) {
-    throw new KarpathyTaggedError("no_anthropic_key", "no ANTHROPIC_API_KEY or LITELLM_API_KEY");
-  }
-  const anthropicBase =
-    process.env.ANTHROPIC_BASE_URL ?? process.env.LITELLM_API_BASE;
-
-  const skillBody = KARPATHY_SYSTEM.replace(/^---[\s\S]*?---\n/, "").trim();
-  const prompt = `${skillBody}
-
-The repository is already cloned at /home/user/repo. Do NOT use \`gh\` CLI.
-Instead use git commands directly:
-  - Fetch the PR:  git fetch origin pull/${prNum}/head:pr/${prNum}
-  - Get the diff:  git diff origin/main...pr/${prNum}
-  - List files:    git diff --name-only origin/main...pr/${prNum}
-  - Read files:    use Read/Bash tools on /home/user/repo/<path>
-
-PR to review: ${prUrl}`;
-
-  const SANDBOX_MAX = 2;
-  let lastErr: Error | undefined;
-  for (let si = 0; si <= SANDBOX_MAX; si++) {
-    if (si > 0) {
-      const delay = 5_000 * Math.pow(2, si - 1);
-      dbg(
-        `_runKarpathyE2B[${prNum}]: timeout — sandbox retry ${si}/${SANDBOX_MAX} in ${delay / 1000}s`,
-      );
-      await new Promise((r) => setTimeout(r, delay));
-    }
-    try {
-      const review = await _runKarpathyE2BSandbox(
-        prNum,
-        e2bKey,
-        anthropicKey,
-        anthropicBase,
-        prompt,
-      );
-      return { review, attempts: si + 1 };
-    } catch (err) {
-      const msg = (err as Error).message ?? "";
-      const isTimeout =
-        msg.includes("deadline_exceeded") ||
-        msg.includes("timed out") ||
-        msg.includes("timeoutMs");
-      if (!isTimeout || si >= SANDBOX_MAX) {
-        if (isTimeout && si >= SANDBOX_MAX) {
-          const tagged =
-            err instanceof KarpathyTaggedError
-              ? err
-              : new KarpathyTaggedError("claude_timeout_exhausted", msg);
-          (tagged as any).kind = "claude_timeout_exhausted";
-          throw tagged;
-        }
-        throw err;
-      }
-      lastErr = err as Error;
-    }
-  }
-  throw lastErr ?? new KarpathyTaggedError("unknown", "sandbox loop exhausted");
-}
-
-async function _runKarpathyE2BSandbox(
-  prNum: number,
-  e2bKey: string,
-  anthropicKey: string,
-  anthropicBase: string | undefined,
-  prompt: string,
-): Promise<KarpathyReview> {
-  let sandbox: Sandbox;
-  try {
-    sandbox = await Sandbox.create("claude", {
-      apiKey: e2bKey,
-      envs: {
-        ANTHROPIC_API_KEY: anthropicKey,
-        ...(anthropicBase ? { ANTHROPIC_BASE_URL: anthropicBase } : {}),
-      },
-      timeoutMs: 600_000,
-    });
-  } catch (e) {
-    throw new KarpathyTaggedError(
-      "sandbox_create",
-      String((e as Error)?.message ?? e).slice(0, 500),
-      { last_known_phase: "sandbox_create" },
-    );
-  }
-
-  try {
-    let cloneResult: Awaited<ReturnType<typeof sandbox.commands.run>>;
-    try {
-      cloneResult = await sandbox.commands.run(
-        `git clone --depth=50 https://github.com/BerriAI/litellm.git /home/user/repo 2>&1`,
-        { timeoutMs: 120_000 },
-      );
-    } catch (e) {
-      throw new KarpathyTaggedError(
-        "git_clone",
-        `git clone threw: ${String((e as Error)?.message ?? e).slice(0, 300)}`,
-        { last_known_phase: "git_clone" },
-      );
-    }
-    if (cloneResult.exitCode !== 0) {
-      throw new KarpathyTaggedError(
-        "git_clone",
-        `git clone failed (exit ${cloneResult.exitCode})`,
-        {
-          exit_code: cloneResult.exitCode,
-          stdout_tail: _stdoutTail(cloneResult.stdout ?? ""),
-          last_known_phase: "git_clone",
-        },
-      );
-    }
-
-    let fetchWarning: string | null = null;
-    try {
-      const fetchResult = await sandbox.commands.run(
-        `cd /home/user/repo && git fetch origin pull/${prNum}/head:pr/${prNum} 2>&1`,
-        { timeoutMs: 60_000 },
-      );
-      if (fetchResult.exitCode !== 0) {
-        fetchWarning = _stdoutTail(fetchResult.stdout ?? "");
-        dbg(
-          `_runKarpathyE2BSandbox[${prNum}]: fetch warning: ${(fetchResult.stdout ?? "").slice(0, 200)}`,
-        );
-      }
-    } catch (e) {
-      fetchWarning = String((e as Error)?.message ?? e).slice(0, 500);
-      dbg(`_runKarpathyE2BSandbox[${prNum}]: fetch threw: ${fetchWarning}`);
-    }
-
-    try {
-      await sandbox.files.write("/tmp/karpathy_prompt.txt", prompt);
-    } catch (e) {
-      throw new KarpathyTaggedError(
-        "files_write",
-        `prompt file write failed: ${String((e as Error)?.message ?? e).slice(0, 300)}`,
-        { last_known_phase: "files_write" },
-      );
-    }
-
-    const MAX_403 = 2;
-    let claudeResult: Awaited<ReturnType<typeof sandbox.commands.run>>;
-    let capturedOutput = "";
-    let attempt = 0;
-    let saw403 = false;
-    while (true) {
-      capturedOutput = "";
-      try {
-        claudeResult = await sandbox.commands.run(
-          `cd /home/user/repo && claude --dangerously-skip-permissions -p "$(cat /tmp/karpathy_prompt.txt)"`,
-          {
-            timeoutMs: 600_000,
-            onStdout: (data: string) => {
-              capturedOutput += data;
-            },
-            onStderr: (data: string) => {
-              capturedOutput += data;
-            },
-          },
-        );
-      } catch (e) {
-        const msg = String((e as Error)?.message ?? e);
-        throw new KarpathyTaggedError(
-          msg.includes("timed out") || msg.includes("deadline_exceeded") ? "claude_timeout_exhausted" : "claude_exec_nonzero",
-          `claude exec threw: ${msg.slice(0, 300)}`,
-          { stdout_tail: _stdoutTail(capturedOutput), last_known_phase: "claude_exec" },
-        );
-      }
-      const is403 =
-        claudeResult.exitCode !== 0 && capturedOutput.includes("403");
-      if (is403) saw403 = true;
-      if (!is403 || attempt >= MAX_403) break;
-      attempt++;
-      dbg(`_runKarpathyE2BSandbox[${prNum}]: 403 — retry ${attempt}/${MAX_403}`);
-      await new Promise((r) => setTimeout(r, 2_000 * attempt));
-    }
-
-    dbg(
-      `_runKarpathyE2BSandbox[${prNum}]: claude exit ${claudeResult.exitCode}`,
-    );
-
-    if (claudeResult.exitCode !== 0) {
-      throw new KarpathyTaggedError(
-        saw403 ? "claude_403_exhausted" : "claude_exec_nonzero",
-        `claude exit ${claudeResult.exitCode}${saw403 ? " (403 retries exhausted)" : ""}`,
-        {
-          exit_code: claudeResult.exitCode,
-          stdout_tail: _stdoutTail(capturedOutput),
-          last_known_phase: fetchWarning ? "git_fetch_warning + claude_exec" : "claude_exec",
-        },
-      );
-    }
-
-    const raw = extractLastJson(claudeResult.stdout);
-    if (!raw) {
-      throw new KarpathyTaggedError(
-        "no_json_in_output",
-        "claude produced no parseable JSON",
-        {
-          stdout_tail: _stdoutTail(claudeResult.stdout ?? capturedOutput),
-          last_known_phase: "extract_json",
-        },
-      );
-    }
-    try {
-      return KarpathyReviewSchema.parse(raw);
-    } catch (zerr) {
-      throw new KarpathyTaggedError(
-        "schema_parse",
-        `zod: ${String((zerr as Error)?.message ?? zerr).slice(0, 300)}`,
-        {
-          stdout_tail: JSON.stringify(raw).slice(-KARPATHY_STDOUT_CAP),
-          last_known_phase: "schema_parse",
-        },
-      );
-    }
-  } finally {
-    try {
-      await sandbox.kill();
-    } catch {
-      /* swallow — finally cleanup, sandbox may already be gone */
-    }
-  }
-}
 
 // --- Fuse logic (port of Python fuse()) ---------------------------------------
 
@@ -1678,7 +1412,7 @@ async function _patternSingleShot(
   const gatherData = await _runGatherLocal(
     prUrl,
     log,
-    _activePatternGatherScript(),
+    PATTERN_GATHER_SCRIPT,
     "pattern",
   );
   const userPrompt = _buildPatternPrompt(prUrl, gatherData);

@@ -567,6 +567,23 @@ export const TriageReportSchema = z.object({
   failure_rationales: z.record(z.string()).default({}),
   running_checks: z.array(z.string()).default([]),
   greptile_score: z.number().int().nullable().default(null),
+  // Why the greptile_score is what it is — populated by the gather
+  // script. Surfaced in the verdict_one_liner so users can see
+  // "comment edited by non-bot, score untrusted" instead of the
+  // misleading "Greptile has not reviewed this PR yet" when greptile
+  // actually did review but the comment was tampered with.
+  greptile_score_reason: z
+    .enum([
+      "check_run",
+      "comment_unedited",
+      "comment_bot_self_edited",
+      "no_check_run_comment_edited_unverifiable",
+      "no_check_run_comment_tainted",
+      "no_check_run_no_score_in_comment",
+      "no_greptile_activity",
+    ])
+    .nullable()
+    .default(null),
   has_circleci_checks: z.boolean(),
   has_merge_conflicts: z.boolean().nullable().default(null),
   scope_drift: z.boolean().default(false),
@@ -908,6 +925,34 @@ function isWideLowDensityFanout(t: TriageReport): boolean {
   return total / t.files_changed < 5;
 }
 
+// Map the structured greptile_score_reason from the gather script into
+// the one-line user-facing penalty label. Every branch is named so the
+// card never silently lies about why the gate failed — "no review" must
+// be distinguishable from "review present but tampered".
+function _greptileNullReasonLabel(
+  reason: TriageReport["greptile_score_reason"],
+): string {
+  switch (reason) {
+    case "no_check_run_comment_tainted":
+      return "Greptile review present but comment was edited by a non-bot user — score untrusted";
+    case "no_check_run_comment_edited_unverifiable":
+      return "Greptile review present but comment was edited and editor identity unverifiable (set GITHUB_TOKEN to enable bot-self-edit verification)";
+    case "no_check_run_no_score_in_comment":
+      return "Greptile commented but no Confidence Score line was found";
+    case "no_greptile_activity":
+      return "Greptile has not reviewed this PR yet";
+    case null:
+    case undefined:
+      // Older gather script / pre-migration TriageReport row.
+      return "Greptile has not reviewed this PR yet";
+    default:
+      // check_run / comment_unedited / comment_bot_self_edited would
+      // have produced a non-null score — reaching here means the
+      // gather output is internally inconsistent.
+      return `Greptile score missing (gather reason=${reason})`;
+  }
+}
+
 // Returns the KarpathyReview payload only when the check successfully
 // produced one. Skipped/errored/killed/running records contribute no
 // penalty — same neutral behavior as the previous `null` sentinel.
@@ -1010,7 +1055,7 @@ export function fuse(
     [
       1,
       (t) => t.greptile_score === null,
-      () => "Greptile has not reviewed this PR yet",
+      (t) => _greptileNullReasonLabel(t.greptile_score_reason),
     ],
   ];
 
@@ -1673,6 +1718,8 @@ function _triageReportFromGather(
 
   const inProgress = (g.in_progress_checks as string[] | undefined) ?? [];
   const greptileScore = (g.greptile_score as number | null | undefined) ?? null;
+  const greptileScoreReason =
+    (g.greptile_score_reason as TriageReport["greptile_score_reason"] | undefined) ?? null;
   const hasCircleCi = (g.has_circleci_checks as boolean | undefined) ?? false;
   const prNum =
     (g.pr_number as number | undefined) ?? prNumberFromUrl(prUrl) ?? 0;
@@ -1697,6 +1744,7 @@ function _triageReportFromGather(
     additions,
     deletions,
     greptile_score: greptileScore,
+    greptile_score_reason: greptileScoreReason,
     has_circleci_checks: hasCircleCi,
     has_merge_conflicts: hasMergeConflicts,
     running_checks: inProgress,
@@ -1768,11 +1816,14 @@ export async function reviewPr(
         // injection surface (PR body / CI logs / comments) for low-trust PRs.
         if (!greptileGatePass(gatherData)) {
           const score = gatherData.greptile_score;
-          log(`triage: greptile gate failed (score=${score}) — skipping LLM`);
+          const reason = gatherData.greptile_score_reason ?? "(unset)";
+          log(
+            `triage: greptile gate failed (score=${score} reason=${reason}) — skipping LLM`,
+          );
           triage = _triageReportFromGather(
             prUrl,
             gatherData,
-            `greptile gate: score=${score} < ${GREPTILE_GATE_MIN_SCORE}`,
+            `greptile gate: score=${score} reason=${reason} < min=${GREPTILE_GATE_MIN_SCORE}`,
           );
           triageTrace = [
             {
@@ -1784,7 +1835,7 @@ export async function reviewPr(
               kind: "result",
               tool: "gather_pr_triage_data",
               isError: false,
-              preview: `pr_number=${gatherData.pr_number} greptile_score=${score} (gate failed, LLM skipped)`,
+              preview: `pr_number=${gatherData.pr_number} greptile_score=${score} greptile_score_reason=${reason} (gate failed, LLM skipped)`,
             },
           ];
           return;

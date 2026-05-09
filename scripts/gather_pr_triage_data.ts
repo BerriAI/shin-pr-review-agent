@@ -535,21 +535,38 @@ export function _scoreFromGreptileCheckRun(checks: any[]): number | null {
 
 // Fallback source: issue comments authored by the Greptile bot. Anyone
 // with write access on the PR can edit a comment body and forge a 5/5
-// score; the GitHub REST API does not expose the editor's identity. We
-// therefore reject any comment whose updated_at differs from created_at
-// (i.e. has been edited at all). Bot self-edits are also rejected — the
-// safer default — since the trusted check-run path will normally cover
-// the legitimate score and this fallback is best-effort. PR review
-// bodies are not used at all because REST exposes no edit signal for
-// them.
-export function _scoreFromGreptileCommentList(comments: any[]): number | null {
+// score; the GitHub REST API does not expose the editor's identity, so
+// REST alone forces us to reject every edited comment.
+//
+// The bot itself, however, edits its own comment on every push (to
+// refresh the score). That's the common case — strict rejection would
+// fail almost every PR. So when GITHUB_TOKEN is available we
+// cross-reference the GraphQL `userContentEdits` connection: a comment
+// is trusted iff every recorded edit was performed by the greptile bot
+// itself. Any single human edit poisons the comment.
+//
+// editorMap: comment.databaseId → "ok" | "tainted" | "unknown"
+//   "ok"      = no edits, or every edit by greptile bot
+//   "tainted" = at least one edit by a non-greptile actor
+//   "unknown" = GraphQL lookup failed or token absent
+//
+// In "unknown" mode we keep the strict REST behavior (reject if
+// updated_at != created_at). PR review bodies are still not used at
+// all because GraphQL also does not expose review-body edit history.
+export function _scoreFromGreptileCommentList(
+  comments: any[],
+  editorMap?: Map<number, "ok" | "tainted">,
+): number | null {
   const candidates: Array<[string, string]> = [];
   for (const c of comments ?? []) {
     if (!isGreptileBotUser(c?.user)) continue;
     const created = c?.created_at ?? "";
     const updated = c?.updated_at ?? "";
-    // Any edit ⇒ untrusted, since REST does not name the editor.
-    if (updated && created && updated !== created) continue;
+    const edited = !!(updated && created && updated !== created);
+    if (edited) {
+      const verdict = editorMap?.get(c?.id);
+      if (verdict !== "ok") continue; // unknown or tainted ⇒ reject
+    }
     candidates.push([created, c.body ?? ""]);
   }
   candidates.sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0));
@@ -558,6 +575,88 @@ export function _scoreFromGreptileCommentList(comments: any[]): number | null {
     if (s !== null) return s;
   }
   return null;
+}
+
+// GraphQL probe: for each greptile-bot issue comment on the PR, walk
+// userContentEdits and verify every edit was performed by the greptile
+// bot itself. Returns null if no token / GraphQL failed — caller falls
+// back to strict REST behavior.
+async function _fetchGreptileCommentEditorMap(
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<Map<number, "ok" | "tainted"> | null> {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) return null;
+  const query = `
+    query($owner: String!, $repo: String!, $pr: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $pr) {
+          comments(first: 100) {
+            nodes {
+              databaseId
+              author { login __typename }
+              userContentEdits(first: 100) {
+                nodes { editor { login __typename } }
+              }
+            }
+          }
+        }
+      }
+    }`;
+  let r: Response;
+  try {
+    r = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        accept: "application/vnd.github.v4+json",
+      },
+      body: JSON.stringify({
+        query,
+        variables: { owner, repo, pr: prNumber },
+      }),
+    });
+  } catch {
+    return null;
+  }
+  if (!r.ok) return null;
+  let json: any;
+  try {
+    json = await r.json();
+  } catch {
+    return null;
+  }
+  const nodes: any[] =
+    json?.data?.repository?.pullRequest?.comments?.nodes ?? [];
+  const map = new Map<number, "ok" | "tainted">();
+  for (const n of nodes) {
+    const author = n?.author;
+    // Greptile bot login in GraphQL Actor: "greptile-apps", __typename "Bot".
+    const isBotAuthor =
+      author &&
+      author.__typename === "Bot" &&
+      author.login === GREPTILE_BOT_APP_SLUG;
+    if (!isBotAuthor) continue;
+    const dbId = typeof n?.databaseId === "number" ? n.databaseId : null;
+    if (dbId === null) continue;
+    const edits: any[] = n?.userContentEdits?.nodes ?? [];
+    let tainted = false;
+    for (const e of edits) {
+      const ed = e?.editor;
+      const edBot =
+        ed &&
+        ed.__typename === "Bot" &&
+        ed.login === GREPTILE_BOT_APP_SLUG;
+      if (!edBot) {
+        tainted = true;
+        break;
+      }
+    }
+    map.set(dbId, tainted ? "tainted" : "ok");
+  }
+  return map;
 }
 
 async function _scoreFromGreptileComments(
@@ -576,7 +675,28 @@ async function _scoreFromGreptileComments(
   } catch {
     return null;
   }
-  return _scoreFromGreptileCommentList(comments);
+  const editorMap =
+    (await _fetchGreptileCommentEditorMap(owner, repo, prNumber)) ?? undefined;
+  return _scoreFromGreptileCommentList(comments, editorMap);
+}
+
+// Score + reason. The reason is opaque to gather but is what the fuse
+// uses to write the human-readable verdict_one_liner — we want
+// "Greptile reviewed 5/5 (comment edits include a non-bot user — score
+// untrusted)" rather than the old useless "Greptile has not reviewed
+// this PR yet" when the bot HAS reviewed but its comment was tampered.
+export type GreptileScoreReason =
+  | "check_run" // score came from immutable check-run
+  | "comment_unedited" // comment never edited
+  | "comment_bot_self_edited" // edits all by greptile bot (GraphQL verified)
+  | "no_check_run_comment_edited_unverifiable" // edited, no GITHUB_TOKEN to check editor
+  | "no_check_run_comment_tainted" // edited by non-bot
+  | "no_check_run_no_score_in_comment" // bot commented but no score parsed
+  | "no_greptile_activity"; // no check-run AND no bot comment
+
+export interface GreptileScoreResult {
+  score: number | null;
+  reason: GreptileScoreReason;
 }
 
 async function _fetchGreptileScore(
@@ -585,10 +705,75 @@ async function _fetchGreptileScore(
   repo: string,
   prNumber: number,
   ownChecks: any[],
-): Promise<number | null> {
+): Promise<GreptileScoreResult> {
   const fromCheck = _scoreFromGreptileCheckRun(ownChecks);
-  if (fromCheck !== null) return fromCheck;
-  return await _scoreFromGreptileComments(mcp, owner, repo, prNumber);
+  if (fromCheck !== null) return { score: fromCheck, reason: "check_run" };
+
+  // No trusted check-run. Fall back to comment analysis.
+  let comments: any[] = [];
+  try {
+    comments = await mcp.ghList("github_openapi_mcp-issues/list-comments", {
+      owner,
+      repo,
+      issue_number: prNumber,
+    });
+  } catch {
+    // Comment fetch failed entirely — treat as no activity (best we can say).
+    return { score: null, reason: "no_greptile_activity" };
+  }
+  const botComments = (comments ?? []).filter((c) => isGreptileBotUser(c?.user));
+  if (botComments.length === 0) {
+    return { score: null, reason: "no_greptile_activity" };
+  }
+
+  const editorMap =
+    (await _fetchGreptileCommentEditorMap(owner, repo, prNumber)) ?? undefined;
+
+  // Try to extract a score using the same tamper-resistance rules as
+  // _scoreFromGreptileCommentList. If that returns null, drill into the
+  // bot comments to figure out *why* — was every comment tainted, every
+  // comment edited but unverifiable, or just no score in the body?
+  const score = _scoreFromGreptileCommentList(comments, editorMap);
+  if (score !== null) {
+    // Determine which path produced the score: any unedited comment
+    // ⇒ comment_unedited; otherwise it must have been a bot-self-edit
+    // verified via GraphQL.
+    const anyUnedited = botComments.some(
+      (c) => !(c?.updated_at && c?.created_at && c.updated_at !== c.created_at),
+    );
+    return {
+      score,
+      reason: anyUnedited ? "comment_unedited" : "comment_bot_self_edited",
+    };
+  }
+
+  // No score returned. Categorize by why each candidate was dropped.
+  let anyTainted = false;
+  let anyEditedUnverified = false;
+  let anyUneditedNoScore = false;
+  for (const c of botComments) {
+    const created = c?.created_at ?? "";
+    const updated = c?.updated_at ?? "";
+    const edited = !!(updated && created && updated !== created);
+    if (!edited) {
+      anyUneditedNoScore = true;
+      continue;
+    }
+    const verdict = editorMap?.get(c?.id);
+    if (verdict === "tainted") anyTainted = true;
+    else if (verdict === "ok") {
+      // bot-self-edited but no score parsed from body
+      anyUneditedNoScore = true;
+    } else {
+      anyEditedUnverified = true;
+    }
+  }
+  if (anyTainted) return { score: null, reason: "no_check_run_comment_tainted" };
+  if (anyEditedUnverified)
+    return { score: null, reason: "no_check_run_comment_edited_unverifiable" };
+  if (anyUneditedNoScore)
+    return { score: null, reason: "no_check_run_no_score_in_comment" };
+  return { score: null, reason: "no_greptile_activity" };
 }
 
 // --------------------------------------------------------------------------- //
@@ -672,7 +857,9 @@ async function gather(
   // installation auth, immutable to non-app actors); we prefer that over
   // PR comments, which any contributor with write access can edit to
   // forge a high score.
-  const greptileScore = await _fetchGreptileScore(mcp, owner, repo, prNumber, ownChecks);
+  const greptileResult = await _fetchGreptileScore(mcp, owner, repo, prNumber, ownChecks);
+  const greptileScore = greptileResult.score;
+  const greptileScoreReason = greptileResult.reason;
 
   const passing: string[] = [];
   const inProgress: string[] = [];
@@ -771,6 +958,7 @@ async function gather(
     diff_files: diffFiles,
     other_pr_numbers: otherPrs.map((p: any) => p.number),
     greptile_score: greptileScore,
+    greptile_score_reason: greptileScoreReason,
     has_circleci_checks: _hasCircleciChecks(ownChecks),
     mergeable,
     mergeable_state: mergeableState,

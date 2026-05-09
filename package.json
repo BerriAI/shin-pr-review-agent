@@ -1,7 +1,7 @@
 {
   "name": "pi-pr-review-agent",
   "version": "0.1.0",
-  "description": "PR review agent server using @mariozechner/pi-coding-agent",
+  "description": "PR review agent server using @cursor/sdk (cloud-mode agents against BerriAI/litellm)",
   "type": "module",
   "private": true,
   "scripts": {
@@ -12,7 +12,7 @@
     "@arizeai/openinference-instrumentation-anthropic": "^0.1.10",
     "@arizeai/openinference-instrumentation-openai": "^4.1.0",
     "@arizeai/openinference-semantic-conventions": "^2.3.0",
-    "@mariozechner/pi-coding-agent": "^0.71.1",
+    "@cursor/sdk": "^1.0.12",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/auto-instrumentations-node": "^0.74.0",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.216.0",

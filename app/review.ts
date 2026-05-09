@@ -3,15 +3,16 @@ import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  AuthStorage,
-  createAgentSession,
-  defineTool,
-  ModelRegistry,
-  SessionManager,
-  type AgentSession,
-  type ToolDefinition,
-} from "@mariozechner/pi-coding-agent";
+// @ts-ignore — @cursor/sdk ships ESM types
+import { Agent } from "@cursor/sdk";
+
+type CursorAgent = any;
+// Tool defs in the legacy contract carried { name, description, parameters,
+// execute }. With Cursor SDK, tool registration happens server-side via MCP
+// rather than as JS functions, so this is an opaque marker for the few
+// remaining call sites that pass through `extraTools` arrays.
+type ToolDefinition = { name: string; [k: string]: unknown };
+type AgentSession = CursorAgent;
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import {
   OpenInferenceSpanKind,
@@ -76,102 +77,45 @@ function _previewForDbg(v: unknown, max = 800): string {
   return s.length > max ? `${s.slice(0, max)}…[+${s.length - max} chars]` : s;
 }
 
-// --- Pi SDK shared infra (initialised once) -----------------------------------
+// --- Cursor SDK config --------------------------------------------------------
 
-export let authStorage!: AuthStorage;
-export let modelRegistry!: ModelRegistry;
+const CURSOR_API_KEY = process.env.CURSOR_API_KEY;
+const CURSOR_MODEL = process.env.CURSOR_MODEL ?? "claude-sonnet-4-6";
+const LITELLM_REPO_URL =
+  process.env.CURSOR_REPO_URL ?? "https://github.com/BerriAI/litellm";
 
-export async function initRegistry(): Promise<void> {
-  authStorage = AuthStorage.create();
-  modelRegistry = ModelRegistry.create(authStorage);
-
-  const base = process.env.LITELLM_API_BASE?.replace(/\/+$/, "");
-  const key = process.env.LITELLM_API_KEY;
-  if (!base || !key) {
-    return;
+function envForward(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of [
+    "LITELLM_API_BASE",
+    "LITELLM_API_KEY",
+    "GITHUB_TOKEN",
+    "ANTHROPIC_API_KEY",
+  ]) {
+    const v = process.env[k];
+    if (v) out[k] = v;
   }
-
-  const CHAT_MODEL_DROP = [
-    "dall-e",
-    "sora",
-    "whisper",
-    "tts",
-    "embedding",
-    "moderation",
-    "realtime",
-    "image",
-    "audio",
-    "transcribe",
-    "search-preview",
-    "search-api",
-    "deep-research",
-    "1024-x-",
-    "1536-x-",
-    "1792-x-",
-    "512-x-",
-    "256-x-",
-    "davinci-",
-    "babbage-",
-    "-instruct",
-    "chatgpt-image",
-  ];
-  function isChatModel(id: string): boolean {
-    if (id.endsWith("/*")) return false;
-    const lower = id.toLowerCase();
-    return !CHAT_MODEL_DROP.some((bad) => lower.includes(bad));
-  }
-
-  let modelIds: string[] = [];
-  try {
-    const r = await fetch(`${base}/v1/models`, {
-      headers: { Authorization: `Bearer ${key}` },
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const payload = (await r.json()) as { data?: Array<{ id: string }> };
-    modelIds = (payload.data ?? []).map((m) => m.id).filter(isChatModel);
-  } catch {
-    modelIds = ["openai/gpt-4o-mini"];
-  }
-  if (!modelIds.length) {
-    return;
-  }
-
-  modelRegistry.registerProvider("litellm", {
-    name: "LiteLLM",
-    baseUrl: `${base}/v1`,
-    apiKey: "LITELLM_API_KEY",
-    api: "openai-completions",
-    authHeader: true,
-    models: modelIds.map((id) => ({
-      id,
-      name: id,
-      reasoning: false,
-      input: ["text"] as ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 200000,
-      maxTokens: 8192,
-    })),
-  });
-
-  const preferred =
-    process.env.LITELLM_DEFAULT_MODEL ||
-    modelIds.find((id) => id === "anthropic/claude-sonnet-4-6") ||
-    modelIds.find((id) => id.startsWith("anthropic/claude-sonnet")) ||
-    modelIds.find((id) => id.startsWith("anthropic/claude")) ||
-    modelIds.find((id) => id.startsWith("openai/gpt-4")) ||
-    modelIds[0];
-  defaultModelId = preferred;
-  _litellmBase = base;
-  _litellmKey = key;
+  return out;
 }
 
-let defaultModelId: string | undefined;
-let _litellmBase: string | undefined;
-let _litellmKey: string | undefined;
+async function newCloudAgent(name: string): Promise<CursorAgent> {
+  if (!CURSOR_API_KEY) throw new Error("CURSOR_API_KEY not set");
+  return Agent.create({
+    apiKey: CURSOR_API_KEY,
+    name,
+    model: { id: CURSOR_MODEL },
+    cloud: {
+      repos: [{ url: LITELLM_REPO_URL }],
+      envVars: envForward(),
+    },
+  });
+}
 
-function defaultModel() {
-  if (!defaultModelId) return undefined;
-  return modelRegistry.find("litellm", defaultModelId);
+// initRegistry: kept as a no-op so server.ts startup contract is preserved.
+// LiteLLM-as-LLM-provider is gone; LITELLM_* env vars are now scoped to the
+// gather scripts' GitHub MCP-proxy use only.
+export async function initRegistry(): Promise<void> {
+  return;
 }
 
 // --- runPrompt helper ----------------------------------------------------------
@@ -187,7 +131,7 @@ export type StreamEvent =
   | { type: "progress"; text: string };
 
 export async function runPrompt(
-  session: AgentSession,
+  agent: CursorAgent,
   message: string,
   onStream?: (event: StreamEvent) => void,
 ): Promise<{ output: string; toolTrace: ToolTraceEntry[] }> {
@@ -198,109 +142,55 @@ export async function runPrompt(
   const trace: ToolTraceEntry[] = [];
   let assistantText = "";
   const pending = new Map<string, string>();
-  let settled = false;
-  let release!: () => void;
-  const done = new Promise<void>((res) => {
-    release = res;
-  });
-
   let eventCount = 0;
-  const unsubscribe = session.subscribe((event: any) => {
+
+  const sys = (agent as any).__systemPrompt as string | undefined;
+  const fullMessage = sys ? wrapWithSkill(sys, message) : message;
+  const run = await agent.send(fullMessage);
+  for await (const event of run.stream()) {
     eventCount++;
-    if (event.type === "message_update") {
-      const m = event.assistantMessageEvent;
-      if (m?.type === "text_delta" && typeof m.delta === "string") {
-        assistantText += m.delta;
-        onStream?.({ type: "text_delta", delta: m.delta });
+    const t = event?.type;
+    if (t === "assistant") {
+      const blocks = event.message?.content ?? [];
+      for (const block of blocks) {
+        if (block?.type === "text" && typeof block.text === "string") {
+          assistantText += block.text;
+          onStream?.({ type: "text_delta", delta: block.text });
+        }
       }
-    } else if (event.type === "tool_execution_start") {
-      const id = event.toolCallId ?? `${event.toolName}:${trace.length}`;
-      pending.set(id, event.toolName);
+    } else if (t === "tool_call") {
+      const id = event.id ?? event.toolCallId ?? `${event.tool ?? event.name}:${trace.length}`;
+      const name = event.tool ?? event.name ?? "tool";
+      const args = event.args ?? event.params ?? event.input ?? {};
+      pending.set(id, name);
       dbg(
-        `runPrompt[${promptId}]: tool_execution_start tool=${event.toolName} id=${id} args=${_previewForDbg(event.args ?? {})}`,
+        `runPrompt[${promptId}]: tool_call tool=${name} id=${id} args=${_previewForDbg(args)}`,
       );
-      trace.push({
-        kind: "call",
-        tool: event.toolName,
-        args: event.args ?? {},
-      });
-      onStream?.({
-        type: "tool_call",
-        tool: event.toolName,
-        args: event.args ?? {},
-      });
-    } else if (event.type === "tool_execution_end") {
-      const id = event.toolCallId ?? "";
-      const name = pending.get(id) ?? event.toolName ?? "tool";
+      trace.push({ kind: "call", tool: name, args });
+      onStream?.({ type: "tool_call", tool: name, args });
+    } else if (t === "tool_result") {
+      const id = event.id ?? event.toolCallId ?? "";
+      const name = pending.get(id) ?? event.tool ?? event.name ?? "tool";
       pending.delete(id);
       const raw = event.result ?? event.output ?? event.error ?? "";
       const s = typeof raw === "string" ? raw : JSON.stringify(raw);
-      const preview = s;
+      const isError = !!(event.isError ?? event.error);
       dbg(
-        `runPrompt[${promptId}]: tool_execution_end tool=${name} isError=${!!event.isError} resultLen=${s.length} resultPreview=${_previewForDbg(s, 800)}`,
+        `runPrompt[${promptId}]: tool_result tool=${name} isError=${isError} resultLen=${s.length}`,
       );
-      trace.push({
-        kind: "result",
-        tool: name,
-        isError: !!event.isError,
-        preview,
-      });
-      onStream?.({
-        type: "tool_result",
-        tool: name,
-        isError: !!event.isError,
-        preview,
-      });
-    } else if (event.type === "tool_execution_update") {
-      const raw = event.update;
-      const text =
-        raw == null ? "" : typeof raw === "string" ? raw : JSON.stringify(raw);
+      trace.push({ kind: "result", tool: name, isError, preview: s });
+      onStream?.({ type: "tool_result", tool: name, isError, preview: s });
+    } else if (t === "status" || t === "task") {
+      const text = event.text ?? event.message ?? "";
       if (text) onStream?.({ type: "progress", text });
-    } else if (event.type === "agent_end" && !settled) {
-      dbg(`runPrompt[${promptId}]: agent_end received, releasing done promise`);
-      settled = true;
-      release();
     } else {
-      dbg(`runPrompt[${promptId}]: event type=${event.type}`);
-    }
-  });
-
-  try {
-    dbg(`runPrompt[${promptId}]: calling session.prompt()`);
-    await session.prompt(message);
-    dbg(
-      `runPrompt[${promptId}]: session.prompt() resolved, awaiting agent_end (events so far=${eventCount}, pending tools=${pending.size})`,
-    );
-    await done;
-    dbg(
-      `runPrompt[${promptId}]: done awaited; total events=${eventCount}, assistantTextLen=${assistantText.length}, traceLen=${trace.length}`,
-    );
-  } finally {
-    unsubscribe();
-    dbg(`runPrompt[${promptId}]: unsubscribed`);
-  }
-
-  if (!assistantText.trim()) {
-    const msgs: any[] =
-      (session as any).messages ??
-      (session as any).agent?.state?.messages ??
-      [];
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const m = msgs[i];
-      if (m?.role === "assistant") {
-        const c = m.content;
-        if (typeof c === "string") {
-          assistantText = c;
-        } else if (Array.isArray(c)) {
-          assistantText = c
-            .filter((p: any) => p?.type === "text")
-            .map((p: any) => p.text)
-            .join("");
-        }
-        break;
-      }
+      dbg(`runPrompt[${promptId}]: event type=${t}`);
     }
   }
+  await run.wait?.();
+  dbg(
+    `runPrompt[${promptId}]: stream drained; total events=${eventCount}, assistantTextLen=${assistantText.length}, traceLen=${trace.length}`,
+  );
 
   return { output: assistantText, toolTrace: trace };
 }
@@ -865,84 +755,32 @@ function extractLastJson(text: string): unknown | null {
   return null;
 }
 
-// --- review_pr tool (exposed to chat agent) -----------------------------------
-
-const reviewPrTool = defineTool({
-  name: "review_pr",
-  label: "Review PR",
-  description:
-    "Run the full triage + pattern review pipeline on a GitHub PR URL. Returns a merge confidence card and drilldown with CI analysis, pattern conformance findings, and prior reviewer signals.",
-  parameters: {
-    type: "object" as const,
-    required: ["pr_url"],
-    properties: {
-      pr_url: {
-        type: "string",
-        description:
-          "GitHub pull request URL, e.g. https://github.com/BerriAI/litellm/pull/26957",
-      },
-    },
-  },
-  execute: async (
-    _toolCallId: string,
-    params: { pr_url: string },
-    _signal: any,
-    onUpdate: any,
-  ) => {
-    dbg(
-      `review_pr.execute: ENTER pr_url=${params.pr_url} toolCallId=${_toolCallId}`,
-    );
-    const progress = (msg: string) => {
-      dbg(`review_pr.execute: progress -> ${msg}`);
-      onUpdate?.({ type: "progress", text: msg });
-    };
-    try {
-      const { card, drilldown } = await reviewPr(params.pr_url, {
-        onProgress: progress,
-      });
-      dbg(
-        `review_pr.execute: reviewPr resolved cardLen=${card.length} drilldownLen=${drilldown.length}`,
-      );
-      const text = drilldown ? `${card}\n\n${drilldown}` : card;
-      return { content: [{ type: "text" as const, text }] };
-    } catch (e) {
-      dbg(`review_pr.execute: THREW`, e);
-      throw e;
-    }
-  },
-});
-
 // --- Agent session factories --------------------------------------------------
+//
+// Cursor SDK has no first-class system-prompt slot on Agent.create and no
+// in-process JS tool surface. So `newSession`'s old contract (systemPrompt +
+// extraTools → AgentSession) collapses to "create cloud agent + remember the
+// system prompt to prepend on every send".
+//
+// Chat-side custom tools (notably the prior `review_pr` tool) are replaced by
+// URL-detect logic in the chat handler, which calls `reviewPr()` directly.
 
 async function newSession(
   systemPrompt: string,
   extraTools: ToolDefinition[] = [],
 ): Promise<AgentSession> {
-  const model = defaultModel();
   dbg(
-    `newSession: ENTER toolCount=${extraTools.length} model=${model ? ((model as any).id ?? "?") : "<none>"} systemPromptLen=${systemPrompt.length}`,
+    `newSession: ENTER toolCount=${extraTools.length} systemPromptLen=${systemPrompt.length}`,
   );
-  // Print the head of the system prompt so we can confirm the path-redirect
-  // line ("instead run `npx tsx …gather_pr_triage_data.ts`") is actually
-  // present — if it's missing or truncated by the SDK, the agent will
-  // freelance curl commands instead of calling the gather script.
-  dbg(
-    `newSession: systemPrompt[0..600]=${_previewForDbg(systemPrompt.slice(0, 600), 600)}`,
-  );
-  const hasGatherRedirect =
-    systemPrompt.includes("gather_pr_triage_data.ts") ||
-    systemPrompt.includes("gather_pattern_local.ts");
-  dbg(`newSession: hasGatherRedirect=${hasGatherRedirect}`);
-  const { session } = await createAgentSession({
-    sessionManager: SessionManager.inMemory(),
-    authStorage,
-    modelRegistry,
-    ...(model ? { model } : {}),
-    customTools: extraTools,
-    systemPrompt,
-  } as any);
-  dbg(`newSession: createAgentSession resolved`);
-  return session;
+  const agent = await newCloudAgent("review");
+  // Stash the system prompt on the agent object so callers that go through
+  // runPrompt(session, msg) get it prepended automatically.
+  (agent as any).__systemPrompt = systemPrompt;
+  return agent;
+}
+
+function wrapWithSkill(systemPrompt: string, userMessage: string): string {
+  return `${systemPrompt}\n\n---\n\n${userMessage}`;
 }
 
 // --- Karpathy check via Pi SDK ------------------------------------------------
@@ -1009,12 +847,7 @@ export async function runKarpathyCheck(
   // ran.
   try {
     const session = await newSession(KARPATHY_SYSTEM);
-    let output: string;
-    try {
-      ({ output } = await runPrompt(session, `Review this PR: ${prUrl}`));
-    } finally {
-      session.dispose?.();
-    }
+    const { output } = await runPrompt(session, `Review this PR: ${prUrl}`);
     const raw = extractLastJson(output);
     if (!raw) {
       throw new KarpathyTaggedError("no_json_in_output", "no JSON in local-session output", {
@@ -1842,122 +1675,53 @@ async function _patternSingleShot(
     "pattern",
   );
   const userPrompt = _buildPatternPrompt(prUrl, gatherData);
-  log(`pattern: single-shot LLM call, prompt=${userPrompt.length} chars`);
+  log(`pattern: single-shot Cursor agent call, prompt=${userPrompt.length} chars`);
+  return _cursorSingleShot({
+    systemPrompt: PATTERN_SYSTEM_SINGLE_SHOT,
+    userPrompt,
+    runId,
+    prUrl,
+    kind: "pattern_single_shot",
+    agentName: "pattern",
+  });
+}
 
-  const base =
-    _litellmBase ?? process.env.LITELLM_API_BASE?.replace(/\/+$/, "");
-  const key = _litellmKey ?? process.env.LITELLM_API_KEY;
-  const model =
-    defaultModelId ??
-    process.env.LITELLM_DEFAULT_MODEL ??
-    "anthropic/claude-sonnet-4-6";
-
-  // OpenInference LLM span around the raw LiteLLM fetch. This call bypasses
-  // the `pi-ai` SDK path (which is auto-instrumented via OpenInference's
-  // OpenAI/Anthropic packages), so we emit OpenInference attributes manually
-  // here so the span renders alongside the SDK-traced ones.
-  return llmTracer.startActiveSpan("chat litellm", async (span) => {
-    const messages = [
-      { role: "system", content: PATTERN_SYSTEM_SINGLE_SHOT },
-      { role: "user", content: userPrompt },
-    ];
-    const requestBody = { model, max_tokens: 4096, messages, metadata: { session_id: runId, trace_id: runId, tags: ["pr-review", "pattern"] } };
-
+async function _cursorSingleShot(opts: {
+  systemPrompt: string;
+  userPrompt: string;
+  runId: string;
+  prUrl: string;
+  kind: string;
+  agentName: string;
+}): Promise<string> {
+  const { systemPrompt, userPrompt, runId, prUrl, kind, agentName } = opts;
+  return llmTracer.startActiveSpan("chat cursor", async (span) => {
     span.setAttributes({
       [SemanticConventions.OPENINFERENCE_SPAN_KIND]: OpenInferenceSpanKind.LLM,
-      [SemanticConventions.LLM_SYSTEM]: "litellm",
-      [SemanticConventions.LLM_PROVIDER]: "litellm",
-      [SemanticConventions.LLM_MODEL_NAME]: model,
-      [SemanticConventions.LLM_INVOCATION_PARAMETERS]: JSON.stringify({
-        max_tokens: 4096,
-      }),
+      [SemanticConventions.LLM_SYSTEM]: "cursor",
+      [SemanticConventions.LLM_PROVIDER]: "cursor",
+      [SemanticConventions.LLM_MODEL_NAME]: CURSOR_MODEL,
       "pr.url": prUrl,
-      "pr.review.kind": "pattern_single_shot",
+      "pr.review.kind": kind,
       "run.id": runId,
     });
     if (CAPTURE_PROMPTS) {
-      span.setAttribute(
-        SemanticConventions.INPUT_VALUE,
-        JSON.stringify(messages),
-      );
+      span.setAttribute(SemanticConventions.INPUT_VALUE, JSON.stringify([
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ]));
       span.setAttribute(SemanticConventions.INPUT_MIME_TYPE, "application/json");
-      messages.forEach((m, i) => {
-        span.setAttribute(
-          `${SemanticConventions.LLM_INPUT_MESSAGES}.${i}.${SemanticConventions.MESSAGE_ROLE}`,
-          m.role,
-        );
-        span.setAttribute(
-          `${SemanticConventions.LLM_INPUT_MESSAGES}.${i}.${SemanticConventions.MESSAGE_CONTENT}`,
-          m.content,
-        );
-      });
     }
-
     try {
-      const resp = await fetch(`${base}/v1/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${key}`,
-        },
-        body: JSON.stringify(requestBody),
-      });
-      if (!resp.ok) {
-        const txt = await resp.text();
-        throw new Error(
-          `LLM call failed HTTP ${resp.status}: ${txt.slice(0, 300)}`,
-        );
-      }
-      const json = (await resp.json()) as {
-        id?: string;
-        model?: string;
-        choices: Array<{
-          message: { content: string };
-          finish_reason?: string;
-        }>;
-        usage?: {
-          prompt_tokens?: number;
-          completion_tokens?: number;
-          total_tokens?: number;
-        };
-      };
-      const content = json.choices[0]?.message?.content ?? "";
-
-      if (json.model) {
-        span.setAttribute(SemanticConventions.LLM_MODEL_NAME, json.model);
-      }
-      if (json.usage?.prompt_tokens != null) {
-        span.setAttribute(
-          SemanticConventions.LLM_TOKEN_COUNT_PROMPT,
-          json.usage.prompt_tokens,
-        );
-      }
-      if (json.usage?.completion_tokens != null) {
-        span.setAttribute(
-          SemanticConventions.LLM_TOKEN_COUNT_COMPLETION,
-          json.usage.completion_tokens,
-        );
-      }
-      if (json.usage?.total_tokens != null) {
-        span.setAttribute(
-          SemanticConventions.LLM_TOKEN_COUNT_TOTAL,
-          json.usage.total_tokens,
-        );
-      }
+      const agent = await newCloudAgent(agentName);
+      const prompt = wrapWithSkill(systemPrompt, userPrompt);
+      const { output } = await runPrompt(agent, prompt);
       if (CAPTURE_PROMPTS) {
-        span.setAttribute(SemanticConventions.OUTPUT_VALUE, content);
+        span.setAttribute(SemanticConventions.OUTPUT_VALUE, output);
         span.setAttribute(SemanticConventions.OUTPUT_MIME_TYPE, "text/plain");
-        span.setAttribute(
-          `${SemanticConventions.LLM_OUTPUT_MESSAGES}.0.${SemanticConventions.MESSAGE_ROLE}`,
-          "assistant",
-        );
-        span.setAttribute(
-          `${SemanticConventions.LLM_OUTPUT_MESSAGES}.0.${SemanticConventions.MESSAGE_CONTENT}`,
-          content,
-        );
       }
       span.setStatus({ code: SpanStatusCode.OK });
-      return content;
+      return output;
     } catch (err) {
       span.recordException(err as Error);
       span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
@@ -2027,147 +1791,21 @@ async function _triageLlmCall(
   runId: string,
 ): Promise<string> {
   const userPrompt = _buildTriagePrompt(prUrl, gatherData);
-  log(`triage: single-shot LLM call, prompt=${userPrompt.length} chars`);
+  log(`triage: single-shot Cursor agent call, prompt=${userPrompt.length} chars`);
   dbg(
     `_triageLlmCall: gatherKeys=${Object.keys(gatherData).join(",")} ` +
       `greptile_score=${gatherData.greptile_score} ` +
       `failing=${(gatherData.failing_check_contexts as unknown[] | undefined)?.length ?? 0} ` +
       `diff_files=${(gatherData.diff_files as unknown[] | undefined)?.length ?? 0}`,
   );
-
-  const base =
-    _litellmBase ?? process.env.LITELLM_API_BASE?.replace(/\/+$/, "");
-  const key = _litellmKey ?? process.env.LITELLM_API_KEY;
-  const model =
-    defaultModelId ??
-    process.env.LITELLM_DEFAULT_MODEL ??
-    "anthropic/claude-sonnet-4-6";
-
-  // Same OpenInference manual-instrumentation shape as _patternSingleShot —
-  // this fetch bypasses the pi-ai SDK auto-instrumentation, so we emit the
-  // semantic-conventions attributes by hand to keep the span consistent.
-  const content = await llmTracer.startActiveSpan(
-    "chat litellm",
-    async (span) => {
-      const messages = [
-        { role: "system", content: TRIAGE_SYSTEM_SINGLE_SHOT },
-        { role: "user", content: userPrompt },
-      ];
-      const requestBody = { model, max_tokens: 4096, messages, metadata: { session_id: runId, trace_id: runId, tags: ["pr-review", "triage"] } };
-
-      span.setAttributes({
-        [SemanticConventions.OPENINFERENCE_SPAN_KIND]:
-          OpenInferenceSpanKind.LLM,
-        [SemanticConventions.LLM_SYSTEM]: "litellm",
-        [SemanticConventions.LLM_PROVIDER]: "litellm",
-        [SemanticConventions.LLM_MODEL_NAME]: model,
-        [SemanticConventions.LLM_INVOCATION_PARAMETERS]: JSON.stringify({
-          max_tokens: 4096,
-        }),
-        "pr.url": prUrl,
-        "pr.review.kind": "triage_single_shot",
-        "run.id": runId,
-      });
-      if (CAPTURE_PROMPTS) {
-        span.setAttribute(
-          SemanticConventions.INPUT_VALUE,
-          JSON.stringify(messages),
-        );
-        span.setAttribute(
-          SemanticConventions.INPUT_MIME_TYPE,
-          "application/json",
-        );
-        messages.forEach((m, i) => {
-          span.setAttribute(
-            `${SemanticConventions.LLM_INPUT_MESSAGES}.${i}.${SemanticConventions.MESSAGE_ROLE}`,
-            m.role,
-          );
-          span.setAttribute(
-            `${SemanticConventions.LLM_INPUT_MESSAGES}.${i}.${SemanticConventions.MESSAGE_CONTENT}`,
-            m.content,
-          );
-        });
-      }
-
-      try {
-        const resp = await fetch(`${base}/v1/chat/completions`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${key}`,
-          },
-          body: JSON.stringify(requestBody),
-        });
-        if (!resp.ok) {
-          const txt = await resp.text();
-          throw new Error(
-            `LLM call failed HTTP ${resp.status}: ${txt.slice(0, 300)}`,
-          );
-        }
-        const json = (await resp.json()) as {
-          id?: string;
-          model?: string;
-          choices: Array<{
-            message: { content: string };
-            finish_reason?: string;
-          }>;
-          usage?: {
-            prompt_tokens?: number;
-            completion_tokens?: number;
-            total_tokens?: number;
-          };
-        };
-        const out = json.choices[0]?.message?.content ?? "";
-
-        if (json.model) {
-          span.setAttribute(SemanticConventions.LLM_MODEL_NAME, json.model);
-        }
-        if (json.usage?.prompt_tokens != null) {
-          span.setAttribute(
-            SemanticConventions.LLM_TOKEN_COUNT_PROMPT,
-            json.usage.prompt_tokens,
-          );
-        }
-        if (json.usage?.completion_tokens != null) {
-          span.setAttribute(
-            SemanticConventions.LLM_TOKEN_COUNT_COMPLETION,
-            json.usage.completion_tokens,
-          );
-        }
-        if (json.usage?.total_tokens != null) {
-          span.setAttribute(
-            SemanticConventions.LLM_TOKEN_COUNT_TOTAL,
-            json.usage.total_tokens,
-          );
-        }
-        if (CAPTURE_PROMPTS) {
-          span.setAttribute(SemanticConventions.OUTPUT_VALUE, out);
-          span.setAttribute(
-            SemanticConventions.OUTPUT_MIME_TYPE,
-            "text/plain",
-          );
-          span.setAttribute(
-            `${SemanticConventions.LLM_OUTPUT_MESSAGES}.0.${SemanticConventions.MESSAGE_ROLE}`,
-            "assistant",
-          );
-          span.setAttribute(
-            `${SemanticConventions.LLM_OUTPUT_MESSAGES}.0.${SemanticConventions.MESSAGE_CONTENT}`,
-            out,
-          );
-        }
-        span.setStatus({ code: SpanStatusCode.OK });
-        return out;
-      } catch (err) {
-        span.recordException(err as Error);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-        throw err;
-      } finally {
-        span.end();
-      }
-    },
-  );
-
-  return content;
+  return _cursorSingleShot({
+    systemPrompt: TRIAGE_SYSTEM_SINGLE_SHOT,
+    userPrompt,
+    runId,
+    prUrl,
+    kind: "triage_single_shot",
+    agentName: "triage",
+  });
 }
 
 // Build a TriageReport directly from the gather JSON when the LLM step fails
@@ -2342,7 +1980,7 @@ export async function reviewPr(
           {
             kind: "call",
             tool: "triage_llm",
-            args: { model: defaultModelId ?? "<default>" },
+            args: { model: CURSOR_MODEL },
           },
           {
             kind: "result",
@@ -2737,13 +2375,13 @@ async function buildAgentConfig(
   if (intent === "review") {
     return {
       systemPrompt: CHAT_SYSTEM,
-      tools: [reviewPrTool],
+      tools: [],
       effectiveIntent: "review",
     };
   }
   return {
     systemPrompt: CHAT_SYSTEM,
-    tools: [reviewPrTool],
+    tools: [],
     effectiveIntent: "general",
   };
 }
@@ -2867,7 +2505,7 @@ export async function promptChatSession(
     `promptChatSession: ensured session, availableTools=${JSON.stringify(availableTools)}`,
   );
   return runQueued(thread, async () => {
-    const { output, toolTrace } = await runPrompt(thread.agent!, message);
+    const { output, toolTrace } = await runChatTurn(thread, message);
     thread.turns.push({ role: "user", content: message });
     thread.turns.push({
       role: "assistant",
@@ -2924,11 +2562,7 @@ export async function promptChatSessionStreaming(
     `promptChatSessionStreaming: ensured session, availableTools=${JSON.stringify(availableTools)}`,
   );
   return runQueued(thread, async () => {
-    const { output, toolTrace } = await runPrompt(
-      thread.agent!,
-      message,
-      onStream,
-    );
+    const { output, toolTrace } = await runChatTurn(thread, message, onStream);
     thread.turns.push({ role: "user", content: message });
     thread.turns.push({
       role: "assistant",
@@ -2949,6 +2583,52 @@ export async function promptChatSessionStreaming(
   });
 }
 
+// PR-URL → reviewPr() → preamble. Replaces the legacy `defineTool({ name:
+// "review_pr" })` flow since Cursor SDK has no JS-side tool surface. Callers
+// (promptChatSession, promptChatSessionStreaming) hand off the raw user
+// message; this extracts URLs, runs the full triage+pattern pipeline for
+// each, and feeds the resulting card+drilldown back as context to the chat
+// agent's next turn.
+const _PR_URL_RE = /https:\/\/github\.com\/[A-Za-z0-9_.\-/]+\/pull\/\d+/g;
+
+async function runChatTurn(
+  thread: Thread,
+  message: string,
+  onStream?: (event: StreamEvent) => void,
+): Promise<{ output: string; toolTrace: ToolTraceEntry[] }> {
+  const matches = message.match(_PR_URL_RE) ?? [];
+  const urls = Array.from(new Set(matches));
+
+  const reviewBlocks: string[] = [];
+  const trace: ToolTraceEntry[] = [];
+  for (const url of urls) {
+    const args = { pr_url: url };
+    onStream?.({ type: "tool_call", tool: "review_pr", args });
+    trace.push({ kind: "call", tool: "review_pr", args });
+    try {
+      const { card, drilldown } = await reviewPr(url, {
+        source: "chat",
+        onProgress: (msg) => onStream?.({ type: "progress", text: msg }),
+      });
+      const text = drilldown ? `${card}\n\n${drilldown}` : card;
+      reviewBlocks.push(`## Review for ${url}\n\n${text}`);
+      onStream?.({ type: "tool_result", tool: "review_pr", isError: false, preview: text });
+      trace.push({ kind: "result", tool: "review_pr", isError: false, preview: text });
+    } catch (e) {
+      const err = String(e).slice(0, 800);
+      reviewBlocks.push(`## Review for ${url}\n\nERROR: ${err}`);
+      onStream?.({ type: "tool_result", tool: "review_pr", isError: true, preview: err });
+      trace.push({ kind: "result", tool: "review_pr", isError: true, preview: err });
+    }
+  }
+
+  const fullMessage = reviewBlocks.length
+    ? `${reviewBlocks.join("\n\n")}\n\n---\nUser message:\n${message}`
+    : message;
+  const { output, toolTrace } = await runPrompt(thread.agent!, fullMessage, onStream);
+  return { output, toolTrace: [...trace, ...toolTrace] };
+}
+
 export function listThreads(): {
   id: string;
   title: string;
@@ -2966,7 +2646,7 @@ export function getThread(threadId: string): Thread | undefined {
 export function deleteThread(threadId: string): boolean {
   const t = THREADS.get(threadId);
   if (!t) return false;
-  t.agent?.dispose?.();
+  t.agent?.stop?.();
   return THREADS.delete(threadId);
 }
 

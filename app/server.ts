@@ -1057,7 +1057,7 @@ app.post("/v1/chat/completions", requireLogin, async (req, res) => {
       id: `chatcmpl-${randomUUID()}`,
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
-      model: body.model ?? "pi-coding-agent",
+      model: body.model ?? process.env.CURSOR_MODEL ?? "claude-sonnet-4-6",
       session_id: sid,
       choices: [
         {

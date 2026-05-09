@@ -1419,6 +1419,23 @@ app.get("/api/models", requireLogin, (_req, res) => {
 
 // --- Backfill endpoint --------------------------------------------------------
 
+// Manual single-PR review trigger. Runs reviewPr inside the server process so
+// the auto-merge hook (registered at startup via setAutoMergeHook) actually
+// fires. Standalone scripts that import reviewPr directly bypass the hook.
+app.post("/api/v1/review", requireLogin, async (req, res) => {
+  const body = (req.body ?? {}) as { pr_url?: unknown };
+  const prUrl = typeof body.pr_url === "string" ? body.pr_url : "";
+  if (!/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(prUrl)) {
+    res.status(400).json({ error: "pr_url required (https://github.com/<owner>/<repo>/pull/<n>)" });
+    return;
+  }
+  res.json({ status: "queued", pr_url: prUrl });
+  // Fire-and-forget; client polls /runs/api/runs to find the new row.
+  reviewPr(prUrl, { source: "manual" }).catch((err) =>
+    console.error(`[manual-review] failed for ${prUrl}:`, err),
+  );
+});
+
 app.post("/api/v1/backfill", requireLogin, async (req, res) => {
   const limit = Math.min(parseInt(String(req.query.limit ?? "20"), 10) || 20, 100);
   const repo = String(req.query.repo ?? "BerriAI/litellm");

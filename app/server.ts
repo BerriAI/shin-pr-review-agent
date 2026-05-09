@@ -473,12 +473,17 @@ async function getOrgInstallationId(org: string): Promise<number> {
   return match.id;
 }
 
-async function listOpenPrs(token: string, repoFullName: string, limit: number): Promise<Array<{
+async function listOpenPrs(
+  token: string,
+  repoFullName: string,
+  limit: number,
+  sort: "created" | "updated" = "created",
+): Promise<Array<{
   number: number; html_url: string; draft: boolean; head: { sha: string }; user: { login: string };
 }>> {
   const perPage = Math.min(limit, 100);
   const r = await fetch(
-    `https://api.github.com/repos/${repoFullName}/pulls?state=open&per_page=${perPage}&sort=created&direction=desc`,
+    `https://api.github.com/repos/${repoFullName}/pulls?state=open&per_page=${perPage}&sort=${sort}&direction=desc`,
     {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -566,6 +571,59 @@ async function areAllCheckSuitesComplete(
   }
   const data = (await r.json()) as { check_suites: Array<{ status: string }> };
   return data.check_suites.length > 0 && data.check_suites.every((s) => s.status === "completed");
+}
+
+async function latestGreptileCommentAt(
+  token: string,
+  repoFullName: string,
+  prNumber: number,
+): Promise<Date | null> {
+  const r = await fetch(
+    `https://api.github.com/repos/${repoFullName}/issues/${prNumber}/comments?per_page=100`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    },
+  );
+  if (!r.ok) {
+    console.warn(`[poll] latestGreptileCommentAt fetch failed: ${r.status}`);
+    return null;
+  }
+  const data = (await r.json()) as Array<{ user?: { login?: string }; created_at?: string }>;
+  let latest: Date | null = null;
+  for (const c of data) {
+    if (c.user?.login !== "greptile-apps[bot]" || !c.created_at) continue;
+    const d = new Date(c.created_at);
+    if (!latest || d > latest) latest = d;
+  }
+  return latest;
+}
+
+async function headCommitDate(
+  token: string,
+  repoFullName: string,
+  sha: string,
+): Promise<Date | null> {
+  const r = await fetch(
+    `https://api.github.com/repos/${repoFullName}/commits/${sha}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    },
+  );
+  if (!r.ok) {
+    console.warn(`[poll] headCommitDate fetch failed: ${r.status}`);
+    return null;
+  }
+  const data = (await r.json()) as { commit?: { committer?: { date?: string } } };
+  const date = data.commit?.committer?.date;
+  return date ? new Date(date) : null;
 }
 
 // Shared post-claim review logic used by both issue_comment and check_suite handlers.
@@ -2569,31 +2627,75 @@ async function autoMergeReadyPr(
   const prState = await fetchPr(token, repo, prNumber);
   if (prState.state !== "open") {
     console.log(`[auto-merge] PR #${prNumber} is ${prState.state}, skipping`);
+    await db.recordAutomergeDecision(runId, {
+      decision: "skipped",
+      reason: "pr_not_open",
+      evidence: { state: prState.state },
+    });
     return;
   }
   const authorLogin = prState.user.login;
   const authorType = prState.user.type;
   const isBot = authorType === "Bot" || /\[bot\]$/.test(authorLogin);
   if (!isBot) {
-    const firstTime = await isFirstTimeAuthor(token, repo, authorLogin);
-    if (firstTime) {
+    const ftaRes = await isFirstTimeAuthor(token, repo, authorLogin);
+    if (ftaRes.is_first_time) {
       console.log(`[auto-merge] PR #${prNumber} first-time author ${authorLogin}, skipping`);
+      await db.recordAutomergeDecision(runId, {
+        decision: "skipped",
+        reason: ftaRes.api_error ? "first_time_author_api_error" : "first_time_author",
+        evidence: {
+          author: authorLogin,
+          prior_merges: ftaRes.prior_merges,
+          api_error: ftaRes.api_error,
+        },
+      });
       return;
     }
   }
   const { claimed, countToday } = await db.claimStagingMergeSlot(prNumber, repo, DAILY_MERGE_CAP);
   if (!claimed) {
     console.log(`[auto-merge] PR #${prNumber} cap reached or already staged (${countToday}/${DAILY_MERGE_CAP} today)`);
+    await db.recordAutomergeDecision(runId, {
+      decision: "skipped",
+      reason: countToday >= DAILY_MERGE_CAP ? "daily_cap_hit" : "already_staged",
+      evidence: { count_today: countToday, cap: DAILY_MERGE_CAP },
+    });
     return;
   }
   console.log(`[auto-merge] PR #${prNumber} READY — merging to staging (${countToday + 1}/${DAILY_MERGE_CAP} today)`);
-  const mergeResult = await mergePrToAgentBranch(token, repo, prNumber, agentBranchName(), cardText);
-  await db.updateStagingMergeResult(prNumber, repo, {
-    stagingPrUrl: mergeResult.staging_pr_url,
-    stagingPrNumber: mergeResult.staging_pr_number,
-    mergeCommitSha: mergeResult.merge_commit_sha,
-    runId,
-  });
+  try {
+    const mergeResult = await mergePrToAgentBranch(token, repo, prNumber, agentBranchName(), cardText);
+    await db.updateStagingMergeResult(prNumber, repo, {
+      stagingPrUrl: mergeResult.staging_pr_url,
+      stagingPrNumber: mergeResult.staging_pr_number,
+      mergeCommitSha: mergeResult.merge_commit_sha,
+      runId,
+    });
+    await db.recordAutomergeDecision(runId, {
+      decision: "merged",
+      reason: "ok",
+      evidence: {
+        staging_pr_url: mergeResult.staging_pr_url,
+        staging_pr_number: mergeResult.staging_pr_number,
+        merge_commit_sha: mergeResult.merge_commit_sha,
+        count_today: countToday + 1,
+        cap: DAILY_MERGE_CAP,
+      },
+    });
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? e);
+    await db.recordMergeError(runId, msg);
+    await db.recordAutomergeDecision(runId, {
+      decision: "failed",
+      reason: "merge_api_error",
+      evidence: { error: msg.slice(0, 500) },
+    });
+    // Free the staging-merge slot so a retry tomorrow isn't blocked by the
+    // failed claim. markStagingMergeReverted preserves the audit row but
+    // unsets the active "staged" status (see db.ts recon notes).
+    try { await db.markStagingMergeReverted(prNumber, repo); } catch {}
+  }
 }
 
 // --- Startup ------------------------------------------------------------------
@@ -2612,11 +2714,11 @@ pollBlockedWatches().catch(console.error);
 
 // Watchdog: flip karpathy_check rows stuck in "running" past 10 min into
 // "killed". The phase-A insertRun in reviewPr writes status="running" before
-// awaiting the karpathy E2B sandbox; if the host process is terminated
+// awaiting the karpathy cursor cloud agent; if the host process is terminated
 // mid-await (Render redeploy, OOM), the row never reaches the post-karpathy
 // upsert. Without this poll those rows look indistinguishable from in-flight
 // reviews. 30-min cadence + 10-min staleness gives a comfortable margin over
-// the typical 60-180s karpathy run + 600s sandbox timeout ceiling.
+// the typical 60-180s karpathy run.
 const KARPATHY_STUCK_INTERVAL_MS = 30 * 60 * 1000;
 async function pollStuckKarpathy(): Promise<void> {
   try {
@@ -2630,6 +2732,77 @@ async function pollStuckKarpathy(): Promise<void> {
 }
 setInterval(() => { pollStuckKarpathy().catch(console.error); }, KARPATHY_STUCK_INTERVAL_MS);
 pollStuckKarpathy().catch(console.error);
+
+// --- PR scan loop -------------------------------------------------------------
+// Restart-safe replacement for the in-memory greptileReadyShas signal.
+// Lists most-recently-updated open PRs and triggers review on any that are
+// (a) non-draft, (b) non-whitelisted, (c) have a Greptile comment, and (d)
+// have all check-suites completed for the current head SHA. Webhook path
+// remains for low-latency triggering; this loop catches anything it misses.
+const PR_SCAN_REPO = process.env.PR_SCAN_REPO ?? "BerriAI/litellm";
+const PR_SCAN_INTERVAL_MS = Number(process.env.PR_SCAN_INTERVAL_MS ?? 5 * 60 * 1000);
+const PR_SCAN_LIMIT = Number(process.env.PR_SCAN_LIMIT ?? 100);
+const PR_SCAN_ENABLED = (process.env.PR_SCAN_ENABLED ?? "true").toLowerCase() !== "false";
+
+async function pollPrScan(): Promise<void> {
+  const t0 = Date.now();
+  const repo = PR_SCAN_REPO;
+  const org = repo.split("/")[0];
+  let installationId: number;
+  try {
+    installationId = await getOrgInstallationId(org);
+  } catch (err) {
+    console.error(`[pr-scan] getOrgInstallationId failed:`, err);
+    return;
+  }
+  const token = await getInstallationToken(installationId);
+  let prs: Awaited<ReturnType<typeof listOpenPrs>>;
+  try {
+    prs = await listOpenPrs(token, repo, PR_SCAN_LIMIT, "updated");
+  } catch (err) {
+    console.error(`[pr-scan] listOpenPrs failed:`, err);
+    return;
+  }
+
+  let scanned = 0;
+  let triggered = 0;
+  for (const pr of prs) {
+    if (pr.draft) continue;
+    if (_WHITELIST_ENTRIES.length && isWhitelistedLogin(pr.user.login)) continue;
+    scanned++;
+    try {
+      const ciDone = await areAllCheckSuitesComplete(token, repo, pr.head.sha);
+      if (!ciDone) continue;
+      const greptileAt = await latestGreptileCommentAt(token, repo, pr.number);
+      if (!greptileAt) continue;
+      const commitAt = await headCommitDate(token, repo, pr.head.sha);
+      if (commitAt && commitAt > greptileAt) {
+        console.log(
+          `[pr-scan] PR #${pr.number} sha=${pr.head.sha} commit=${commitAt.toISOString()} > greptile=${greptileAt.toISOString()} — waiting for Greptile to re-review`,
+        );
+        continue;
+      }
+      console.log(`[pr-scan] ready: PR #${pr.number} sha=${pr.head.sha} — invoking review`);
+      triggered++;
+      await runWebhookReview(installationId, repo, pr.number, undefined, "pr_scan").catch((err) =>
+        console.error(`[pr-scan] review failed PR #${pr.number}:`, err),
+      );
+    } catch (err) {
+      console.error(`[pr-scan] gate-check failed PR #${pr.number}:`, err);
+    }
+  }
+  console.log(
+    `[pr-scan] done repo=${repo} fetched=${prs.length} eligible=${scanned} triggered=${triggered} elapsedMs=${Date.now() - t0}`,
+  );
+}
+
+if (PR_SCAN_ENABLED) {
+  setInterval(() => { pollPrScan().catch(console.error); }, PR_SCAN_INTERVAL_MS);
+  pollPrScan().catch(console.error);
+  console.log(`[pr-scan] enabled repo=${PR_SCAN_REPO} interval=${PR_SCAN_INTERVAL_MS}ms limit=${PR_SCAN_LIMIT}`);
+} else {
+  console.log(`[pr-scan] disabled (PR_SCAN_ENABLED=false)`);
+}
 
 app.listen(PORT, () => {
   console.log(`listening on http://localhost:${PORT}`);

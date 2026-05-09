@@ -286,21 +286,21 @@ try {
   const verdict = await isFirstTimeAuthor("tok", "BerriAI/litellm", "newbie");
   check(
     "author with 0 prior merged PRs is flagged as first-time",
-    verdict === true,
+    verdict.is_first_time === true,
   );
 
   stubFetch(() => makeJsonResp({ total_count: 7, items: [] }));
   const verdict2 = await isFirstTimeAuthor("tok", "BerriAI/litellm", "regular");
   check(
     "author with 7 prior merged PRs is NOT first-time",
-    verdict2 === false,
+    verdict2.is_first_time === false,
   );
 
   stubFetch(() => new Response("rate limited", { status: 403 }));
   const verdict3 = await isFirstTimeAuthor("tok", "BerriAI/litellm", "any");
   check(
     "non-2xx response fails CLOSED (treated as first-time, quarantined)",
-    verdict3 === true,
+    verdict3.is_first_time === true && verdict3.api_error === true,
   );
 
   // URL-encoding sanity: the helper must encode the query string.

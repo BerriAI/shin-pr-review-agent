@@ -53,13 +53,18 @@ export async function insertRun(record: Record<string, unknown>): Promise<void> 
       source, channel, thread_ts, duration_s, logfire_trace_id,
       model_name, tokens_in, tokens_out, cost_usd,
       triage, pattern, card, tool_trace, messages,
-      human_label, human_notes, karpathy_check
+      human_label, human_notes, karpathy_check,
+      gate_results, fuse_trace, timing, automerge_decision, merge_error
     ) VALUES (
       $1, COALESCE(to_timestamp($2), NOW()), $3, $4, $5, $6,
       $7, $8, $9, $10, $11,
       $12, $13, $14, $15,
       $16, $17, $18, $19, $20,
-      $21, $22, $23
+      $21, $22, $23,
+      COALESCE($24::jsonb, '[]'::jsonb),
+      COALESCE($25::jsonb, '[]'::jsonb),
+      COALESCE($26::jsonb, '{}'::jsonb),
+      $27::jsonb, $28
     )
     ON CONFLICT (run_id) DO UPDATE SET
       ts = EXCLUDED.ts, pr_url = EXCLUDED.pr_url,
@@ -71,7 +76,12 @@ export async function insertRun(record: Record<string, unknown>): Promise<void> 
       tokens_out = EXCLUDED.tokens_out, cost_usd = EXCLUDED.cost_usd,
       triage = EXCLUDED.triage, pattern = EXCLUDED.pattern,
       card = EXCLUDED.card, tool_trace = EXCLUDED.tool_trace,
-      messages = EXCLUDED.messages, karpathy_check = EXCLUDED.karpathy_check
+      messages = EXCLUDED.messages, karpathy_check = EXCLUDED.karpathy_check,
+      gate_results = EXCLUDED.gate_results,
+      fuse_trace = EXCLUDED.fuse_trace,
+      timing = EXCLUDED.timing,
+      automerge_decision = EXCLUDED.automerge_decision,
+      merge_error = EXCLUDED.merge_error
   `;
   await pool().query(sql, [
     record.run_id, record.ts ?? null, record.pr_url, record.pr_number ?? null,
@@ -85,7 +95,52 @@ export async function insertRun(record: Record<string, unknown>): Promise<void> 
     JSON.stringify(record.messages ?? { triage: [], pattern: [] }),
     record.human_label ?? null, record.human_notes ?? null,
     JSON.stringify(record.karpathy_check ?? {}),
+    JSON.stringify(record.gate_results ?? []),
+    JSON.stringify(record.fuse_trace ?? []),
+    JSON.stringify(record.timing ?? {}),
+    record.automerge_decision == null ? null : JSON.stringify(record.automerge_decision),
+    record.merge_error ?? null,
   ]);
+}
+
+export async function recordAutomergeDecision(
+  runId: string,
+  d: { decision: "merged" | "skipped" | "failed"; reason: string; evidence?: Record<string, unknown> },
+): Promise<void> {
+  const body = JSON.stringify({
+    decision: d.decision,
+    reason: d.reason,
+    evidence: d.evidence ?? {},
+    ts: Date.now() / 1000,
+  });
+  const { rowCount } = await pool().query(
+    `UPDATE runs SET automerge_decision = $1::jsonb WHERE run_id = $2`,
+    [body, runId],
+  );
+  if (!rowCount) {
+    console.debug(`[db] recordAutomergeDecision: no run with id=${runId}`);
+  }
+}
+
+export async function recordMergeError(runId: string, message: string): Promise<void> {
+  const capped = (message ?? "").slice(0, 2000);
+  const { rowCount } = await pool().query(
+    `UPDATE runs SET merge_error = $1 WHERE run_id = $2`,
+    [capped, runId],
+  );
+  if (!rowCount) {
+    console.debug(`[db] recordMergeError: no run with id=${runId}`);
+  }
+}
+
+export async function recordTiming(runId: string, timing: Record<string, number>): Promise<void> {
+  const { rowCount } = await pool().query(
+    `UPDATE runs SET timing = timing || $1::jsonb WHERE run_id = $2`,
+    [JSON.stringify(timing), runId],
+  );
+  if (!rowCount) {
+    console.debug(`[db] recordTiming: no run with id=${runId}`);
+  }
 }
 
 export async function listRunsSummary(opts: {
@@ -114,7 +169,8 @@ export async function listRunsSummary(opts: {
            card->>'score' AS score_str,
            card->>'verdict' AS verdict,
            card->>'emoji' AS emoji,
-           card->>'verdict_one_liner' AS verdict_one_liner
+           card->>'verdict_one_liner' AS verdict_one_liner,
+           automerge_decision->>'decision' AS automerge_status
     FROM runs ${whereSql}
     ORDER BY ts DESC LIMIT $${args.length}
   `;
@@ -133,7 +189,8 @@ export async function getRun(runId: string): Promise<Record<string, unknown> | n
            source, channel, thread_ts, duration_s, logfire_trace_id,
            model_name, tokens_in, tokens_out, cost_usd,
            triage, pattern, card, tool_trace, messages,
-           human_label, human_notes, karpathy_check
+           human_label, human_notes, karpathy_check,
+           gate_results, fuse_trace, automerge_decision, merge_error, timing
     FROM runs WHERE run_id = $1
   `;
   const { rows } = await pool().query(sql, [runId]);
@@ -147,6 +204,13 @@ export async function getRun(runId: string): Promise<Record<string, unknown> | n
     tool_trace: typeof r.tool_trace === "string" ? JSON.parse(r.tool_trace) : (r.tool_trace ?? []),
     messages: typeof r.messages === "string" ? JSON.parse(r.messages) : (r.messages ?? { triage: [], pattern: [] }),
     karpathy_check: typeof r.karpathy_check === "string" ? JSON.parse(r.karpathy_check) : (r.karpathy_check ?? {}),
+    gate_results: typeof r.gate_results === "string" ? JSON.parse(r.gate_results) : (r.gate_results ?? []),
+    fuse_trace: typeof r.fuse_trace === "string" ? JSON.parse(r.fuse_trace) : (r.fuse_trace ?? []),
+    automerge_decision: typeof r.automerge_decision === "string"
+      ? JSON.parse(r.automerge_decision)
+      : (r.automerge_decision ?? null),
+    merge_error: r.merge_error ?? null,
+    timing: typeof r.timing === "string" ? JSON.parse(r.timing) : (r.timing ?? {}),
   };
 }
 

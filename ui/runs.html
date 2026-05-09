@@ -11,10 +11,21 @@
   html,body{margin:0;padding:0}
   body{font:14px/1.5 -apple-system,system-ui,sans-serif;color:#222;background:#fafafa;padding-left:380px}
   #sidebar{position:fixed;top:0;left:0;width:380px;height:100vh;border-right:1px solid #ddd;background:#f5f5f7;display:flex;flex-direction:column;z-index:5}
-  #sidebar-head{padding:12px 14px;border-bottom:1px solid #e0e0e3;display:flex;gap:8px;align-items:center}
+  #sidebar-head{padding:12px 14px;border-bottom:1px solid #e0e0e3;display:flex;flex-direction:column;gap:8px}
+  #sidebar-head-top{display:flex;gap:8px;align-items:center}
   #sidebar-head h2{font-size:13px;margin:0;flex:1;color:#333}
   #nav-link{font-size:12px;color:#06c;text-decoration:none;padding:4px 8px;border:1px solid #ddd;border-radius:4px;background:#fff}
   #nav-link:hover{background:#eef}
+  #backfill-row{display:flex;gap:6px;align-items:center}
+  #backfill-limit{width:52px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font:inherit;font-size:12px;text-align:center}
+  #backfill-btn{flex:1;padding:5px 10px;border:1px solid #ccc;border-radius:4px;background:#fff;font:inherit;font-size:12px;cursor:pointer;color:#444;white-space:nowrap}
+  #backfill-btn:hover:not(:disabled){background:#f0f0f7}
+  #backfill-btn:disabled{opacity:.5;cursor:wait}
+  #backfill-status{font-size:11px;color:#888;min-height:14px}
+  #filter-tabs{display:flex;gap:0;border-bottom:1px solid #e0e0e3;background:#f0f0f3}
+  .filter-tab{flex:1;padding:7px 4px;border:0;background:transparent;font:inherit;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:#888;cursor:pointer;border-bottom:2px solid transparent}
+  .filter-tab:hover{color:#333;background:#e8e8eb}
+  .filter-tab.active{color:#222;border-bottom-color:#222;background:#f5f5f7}
   #runs-list{flex:1;overflow-y:auto}
   .run-row{padding:10px 14px;border-bottom:1px solid #eee;cursor:pointer;display:flex;flex-direction:column;gap:4px}
   .run-row:hover{background:#eef}
@@ -38,6 +49,9 @@
   .label-empty{background:#eee;color:#888}
   .run-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500}
   .run-meta{font-size:11px;color:#888;display:flex;gap:8px}
+  .run-liner{font-size:11.5px;color:#555;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.4}
+  .run-row.active .run-liner{color:#ccc}
+  .date-group{padding:6px 14px 2px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#aaa;background:#f0f0f3;border-bottom:1px solid #e8e8eb;position:sticky;top:0;z-index:2}
   .empty{color:#999;font-size:13px;text-align:center;padding:32px}
   /* Main column = the rest of the page beside the fixed sidebar. No
      overflow tricks; the document scrolls. */
@@ -50,9 +64,32 @@
   .detail-head h1{font-size:18px;margin:0;flex:1;min-width:300px}
   .pr-link{font-size:12px;color:#06c;text-decoration:none}
   .pr-link:hover{text-decoration:underline}
-  .detail-meta{color:#666;font-size:12px;display:flex;gap:14px;flex-wrap:wrap}
+  .detail-meta{color:#666;font-size:12px;display:flex;gap:14px;flex-wrap:wrap;align-items:center}
   .detail-meta a{color:#06c;text-decoration:none}
   .detail-meta a:hover{text-decoration:underline}
+  .copy-btn{margin-left:auto;padding:5px 12px;border:1px solid #ccc;border-radius:4px;background:#fff;font:inherit;font-size:12px;cursor:pointer;color:#444;white-space:nowrap}
+  .copy-btn:hover{background:#f0f0f7}
+  .copy-btn.copied{background:#d4f4dd;border-color:#0a5;color:#0a5}
+  .merge-btn{margin-left:6px;background:#fff8e6;border-color:#d4a600;color:#7a5c00}
+  .merge-btn:hover:not(:disabled){background:#fff3cc}
+  .merge-btn:disabled{opacity:.5;cursor:wait}
+  .merge-btn.merging{background:#fff3cc;border-color:#d4a600}
+  .merge-btn.merged{background:#d4f4dd;border-color:#0a5;color:#0a5}
+  .merge-btn.merge-error{background:#fde0e0;border-color:#c33;color:#c00}
+  .revert-btn{margin-left:6px;background:#fff0f0;border-color:#c33;color:#b00}
+  .revert-btn:hover:not(:disabled){background:#fde0e0}
+  .revert-btn:disabled{opacity:.5;cursor:wait}
+  .revert-btn.reverting{background:#fde0e0;border-color:#c33}
+  .revert-btn.reverted{background:#f5f5f5;border-color:#aaa;color:#666}
+  .revert-btn.revert-error{background:#fde0e0;border-color:#c33;color:#c00}
+  .merge-branch-label{font-size:11px;color:#0a5;margin-left:6px}
+  .json-section{background:#f6f6f9;border:1px solid #e0e0e3;border-radius:6px;margin-bottom:14px;overflow:hidden}
+  .json-section summary{padding:10px 18px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#666;cursor:pointer;user-select:none;list-style:none;display:flex;align-items:center;gap:8px}
+  .json-section summary:hover{background:#eee}
+  .json-section summary::before{content:'▶';font-size:10px;width:12px}
+  details.json-section[open] summary::before{content:'▼'}
+  .json-body{padding:0 18px 14px;max-height:500px;overflow-y:auto}
+  .json-body pre{margin:0;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-word;line-height:1.5;color:#222}
   /* Two-column body. Document-level scroll. The right column is
      position:sticky so the trace tracks the viewport while the left
      scrolls past it. */
@@ -80,9 +117,26 @@
   .detail-right .section{box-shadow:none;background:#fff}
   .section h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#666;font-weight:600}
   .card-text,.drilldown-text{white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;line-height:1.55;color:#222}
-  .trace-item{border-left:3px solid #88a;background:#f0f0f7;padding:6px 10px;margin:6px 0;border-radius:3px;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-word}
-  .trace-call{border-left-color:#5b8}
-  .trace-return{border-left-color:#88a}
+  /* --- Improved trace renderer --- */
+  .trace-entry{margin:0 0 10px;border-radius:5px;overflow:hidden;border:1px solid #e0e0e3;font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+  .trace-entry-call{border-left:3px solid #4a9}
+  .trace-entry-result{border-left:3px solid #88a}
+  .trace-entry-result.trace-error{border-left-color:#c33}
+  .trace-header{display:flex;align-items:center;gap:8px;padding:5px 10px;background:#f5f5f7;border-bottom:1px solid #e8e8ea;user-select:none}
+  .trace-tool-pill{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:1px 6px;border-radius:3px;background:#e0e0e3;color:#555}
+  .trace-dir{font-size:10px;color:#888;letter-spacing:.04em}
+  .trace-seq{margin-left:auto;font-size:10px;color:#bbb}
+  .trace-cmd{margin:0;padding:8px 12px;background:#1e1e2e;color:#cdd6f4;white-space:pre-wrap;word-break:break-word;line-height:1.5;font-size:11px;max-height:200px;overflow-y:auto}
+  .trace-out-text{margin:0;padding:8px 12px;background:#f9f9fb;color:#333;white-space:pre-wrap;word-break:break-word;line-height:1.5;max-height:200px;overflow-y:auto}
+  .trace-error .trace-out-text{background:#fff5f5;color:#900}
+  .trace-truncated{padding:3px 12px 5px;font-size:10.5px;color:#a60;background:#fffbe6;border-top:1px solid #f0e0a0}
+  .trace-err-badge{padding:3px 12px;font-size:10.5px;color:#900;background:#fff0f0;border-bottom:1px solid #fcc}
+  /* --- Data quality flags --- */
+  .dq-flags{margin-bottom:14px}
+  .dq-flag{display:flex;align-items:flex-start;gap:8px;padding:7px 12px;border-radius:4px;font-size:12px;line-height:1.4;margin-bottom:6px}
+  .dq-warn{background:#fffbe6;border:1px solid #f0d060;color:#6b4f00}
+  .dq-info{background:#e8f4ff;border:1px solid #a0c8f0;color:#004080}
+  .dq-icon{font-size:13px;flex-shrink:0;margin-top:1px}
   /* Full-trace renderer (one block per pydantic_ai message part). Each part
      gets a kind-tinted border so the eye can scan a long trace fast. */
   .trace-controls{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
@@ -120,14 +174,115 @@
   .label-buttons .status{font-size:12px;color:#888}
   .err{color:#c00;font-size:12px;margin-top:6px}
   .ok{color:#0a5;font-size:12px;margin-top:6px}
+  #view-tabs{display:flex;border-bottom:1px solid #e0e0e3;background:#eaeaed}
+  .view-tab{flex:1;padding:7px 4px;border:0;background:transparent;font:inherit;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#888;cursor:pointer;border-bottom:2px solid transparent}
+  .view-tab:hover{color:#333;background:#e0e0e4}
+  .view-tab.active{color:#222;border-bottom-color:#222;background:#f5f5f7}
+  #staging-prs-list{flex:1;overflow-y:auto;display:none}
+  .staging-row{padding:10px 14px;border-bottom:1px solid #eee;display:flex;flex-direction:column;gap:3px;text-decoration:none;color:inherit}
+  .staging-row:hover{background:#eef}
+  .staging-row-top{display:flex;align-items:center;gap:6px}
+  .staging-pr-num{font-size:11px;font-weight:700;color:#555;flex-shrink:0}
+  .staging-pr-title{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .staging-pr-branch{font-size:10px;font-family:ui-monospace,Menlo,monospace;color:#0a5;background:#d4f4dd;padding:1px 5px;border-radius:3px;flex-shrink:0}
+  .staging-pr-meta{font-size:11px;color:#888}
+  .staging-pr-base{font-size:10px;color:#888}
+  #staging-refresh-btn{padding:4px 10px;border:1px solid #ccc;border-radius:4px;background:#fff;font:inherit;font-size:11px;cursor:pointer;color:#444;flex-shrink:0}
+  #staging-refresh-btn:hover{background:#f0f0f7}
+  #staging-status{font-size:11px;color:#888;min-height:14px}
+  #auto-merged-list{flex:1;overflow-y:auto;display:none}
+  .auto-merged-row{padding:10px 14px;border-bottom:1px solid #eee;display:flex;flex-direction:column;gap:3px}
+  .auto-merged-row:hover{background:#eef}
+  .auto-merged-row.has-run{cursor:pointer}
+  .auto-merged-badge{font-size:10px;padding:1px 5px;border-radius:3px;background:#d4f4dd;color:#0a5;font-weight:600;flex-shrink:0}
+  /* ── Conversation pane ──────────────────────────────────────────────── */
+  .right-pane[data-pane="chat"]{overflow:hidden;padding:0;display:flex;flex-direction:column;background:#fff}
+  .right-pane[data-pane="chat"].hidden{display:none}
+  .conv-wrap{display:flex;flex-direction:column;flex:1;overflow:hidden}
+  .conv-body{flex:1;overflow-y:auto;padding:0}
+
+  /* Trigger header */
+  .conv-trigger{padding:18px 20px 14px;border-bottom:1px solid #eee}
+  .conv-trigger-who{font-size:11px;color:#999;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+  .conv-trigger-badge{display:inline-block;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;padding:1px 6px;border-radius:3px;background:#f0f0f3;color:#666}
+  .conv-trigger-title{font-size:15px;font-weight:500;color:#111;line-height:1.4}
+  .conv-trigger-title a{color:#111;text-decoration:none}
+  .conv-trigger-title a:hover{color:#06c}
+
+  /* Agent block */
+  .conv-agent-block{padding:16px 20px;border-bottom:1px solid #eee}
+  .conv-agent-meta{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+  .conv-agent-avatar{width:20px;height:20px;border-radius:4px;background:#222;display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;flex-shrink:0}
+  .conv-worked{font-size:11px;color:#888}
+  .conv-worked strong{color:#444;font-weight:500}
+  .conv-agent-text{font-size:13px;color:#333;white-space:pre-wrap;line-height:1.65}
+
+  /* Follow-ups */
+  .conv-followups{padding:0 20px 16px}
+  .conv-fu-user{margin:16px 0 8px}
+  .conv-fu-who{font-size:11px;color:#999;margin-bottom:5px;font-weight:500}
+  .conv-fu-bubble{background:#f4f4f6;border-radius:6px;padding:9px 13px;font-size:13px;color:#222;line-height:1.5}
+  .conv-fu-bot{margin:8px 0 4px;font-size:13px;color:#333;white-space:pre-wrap;line-height:1.65;padding-left:28px;position:relative}
+  .conv-fu-bot::before{content:'◆';position:absolute;left:4px;top:2px;font-size:9px;color:#ccc}
+  .conv-fu-tool{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#999;padding:2px 0 2px 28px;margin:1px 0}
+  .conv-fu-err{font-size:12px;color:#c00;padding-left:28px;margin:4px 0}
+
+  /* Thinking */
+  .conv-thinking{display:flex;align-items:center;gap:4px;padding:10px 0 4px 28px}
+  .conv-dot{width:5px;height:5px;border-radius:50%;background:#ccc;animation:conv-bounce .8s ease-in-out infinite}
+  .conv-dot:nth-child(2){animation-delay:.16s}
+  .conv-dot:nth-child(3){animation-delay:.32s}
+  @keyframes conv-bounce{0%,60%,100%{transform:translateY(0);opacity:.4}30%{transform:translateY(-4px);opacity:1}}
+
+  /* Input */
+  .conv-input-area{border-top:1px solid #eee;padding:10px 14px 12px;flex-shrink:0;background:#fff}
+  .conv-input-box{
+    width:100%;padding:9px 12px;
+    border:1px solid #e0e0e3;border-radius:7px;
+    font:inherit;font-size:13px;color:#222;
+    resize:none;min-height:38px;max-height:130px;overflow-y:auto;
+    background:#fafafa;outline:none;
+    transition:border-color .15s,background .15s;
+    line-height:1.5;
+  }
+  .conv-input-box:focus{border-color:#bbb;background:#fff}
+  .conv-input-box::placeholder{color:#bbb}
+  .conv-input-hint{font-size:10.5px;color:#ccc;margin-top:5px;padding-left:2px}
 </style></head>
 <body>
 <aside id="sidebar">
   <div id="sidebar-head">
-    <h2>Agent runs</h2>
-    <a id="nav-link" href="/chat">Chat →</a>
+    <div id="sidebar-head-top">
+      <h2 id="sidebar-title">Agent runs</h2>
+      <a id="nav-link" href="/chat">Chat →</a>
+    </div>
+    <div id="backfill-row">
+      <input id="backfill-limit" type="number" min="1" max="100" value="20" title="Number of PRs">
+      <button id="backfill-btn" type="button">▶ Run last N open PRs</button>
+    </div>
+    <div id="backfill-status"></div>
+    <div id="staging-controls" style="display:none;flex-direction:column;gap:4px">
+      <div style="display:flex;gap:6px;align-items:center">
+        <button id="staging-refresh-btn" type="button">↺ Refresh</button>
+        <span id="staging-status"></span>
+      </div>
+    </div>
+  </div>
+  <div id="view-tabs">
+    <button class="view-tab active" data-view="runs" type="button">Runs</button>
+    <button class="view-tab" data-view="staging-prs" type="button">Staging PRs</button>
+    <button class="view-tab" data-view="auto-merged" type="button">Auto-merged</button>
+    <button class="view-tab" data-view="agent" type="button">Agent</button>
+  </div>
+  <div id="filter-tabs">
+    <button class="filter-tab active" data-filter="all" type="button">All</button>
+    <button class="filter-tab" data-filter="ready" type="button">✓ Ready</button>
+    <button class="filter-tab" data-filter="blocked" type="button">✗ Blocked</button>
   </div>
   <div id="runs-list"><div class="empty">Loading…</div></div>
+  <div id="staging-prs-list"><div class="empty">Loading…</div></div>
+  <div id="auto-merged-list"><div class="empty">Loading…</div></div>
+  <div id="agent-panel" style="display:none;flex:1;overflow-y:auto"><div class="empty">Loading…</div></div>
 </aside>
 <main id="main">
   <div id="empty-detail">Select a run on the left.</div>
@@ -139,6 +294,13 @@ const detailEl = document.getElementById('detail');
 const emptyDetailEl = document.getElementById('empty-detail');
 let activeRunId = null;
 let runs = [];
+let activeFilter = 'all';
+
+function filteredRuns(){
+  if (activeFilter === 'ready') return runs.filter(r => (r.verdict || '').toUpperCase() === 'READY');
+  if (activeFilter === 'blocked') return runs.filter(r => (r.verdict || '').toUpperCase() !== 'READY');
+  return runs;
+}
 
 async function authFetch(url, opts){
   const r = await fetch(url, opts);
@@ -158,13 +320,36 @@ function verdictBadgeClass(v){
   return 'badge badge-' + (v || 'blocked').toLowerCase();
 }
 
+function dateGroupLabel(ts){
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(today - 86400000);
+  const runDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  if (runDay >= today) return 'Today';
+  if (runDay >= yesterday) return 'Yesterday';
+  return d.toLocaleDateString(undefined, {weekday:'long', month:'short', day:'numeric'});
+}
+
 function renderRunsList(){
   runsListEl.innerHTML = '';
-  if (!runs.length) {
-    runsListEl.innerHTML = '<div class="empty">No runs yet. They\'ll appear here as the agent reviews PRs.</div>';
+  const visible = filteredRuns();
+  if (!visible.length) {
+    runsListEl.innerHTML = runs.length
+      ? '<div class="empty">No ' + activeFilter + ' runs.</div>'
+      : '<div class="empty">No runs yet. They\'ll appear here as the agent reviews PRs.</div>';
     return;
   }
-  for (const r of runs) {
+  let lastGroup = null;
+  for (const r of visible) {
+    const group = dateGroupLabel(r.ts);
+    if (group !== lastGroup) {
+      const hdr = document.createElement('div');
+      hdr.className = 'date-group';
+      hdr.textContent = group;
+      runsListEl.appendChild(hdr);
+      lastGroup = group;
+    }
     const row = document.createElement('div');
     row.className = 'run-row' + (r.run_id === activeRunId ? ' active' : '');
     row.dataset.id = r.run_id;
@@ -184,15 +369,24 @@ function renderRunsList(){
     top.appendChild(labelTag);
     const title = document.createElement('div');
     title.className = 'run-title';
-    title.textContent = '#' + r.pr_number + ' ' + r.pr_title;
+    // pr_title sometimes echoes the URL when triage couldn't extract a title
+    const displayTitle = (r.pr_title && !r.pr_title.startsWith('http'))
+      ? '#' + r.pr_number + ' ' + r.pr_title
+      : '#' + r.pr_number;
+    title.textContent = displayTitle;
+    const liner = document.createElement('div');
+    liner.className = 'run-liner';
+    liner.textContent = r.verdict_one_liner || '';
     const meta = document.createElement('div');
     meta.className = 'run-meta';
-    const parts = [r.pr_author, fmtTime(r.ts)];
+    const parts = [];
+    if (r.pr_author) parts.push(r.pr_author);
+    parts.push(new Date(r.ts * 1000).toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'}));
     if (r.duration_s != null) parts.push(fmtDuration(r.duration_s));
-    if (r.cost_usd != null) parts.push(fmtCost(r.cost_usd));
     meta.textContent = parts.join(' · ');
     row.appendChild(top);
     row.appendChild(title);
+    if (r.verdict_one_liner) row.appendChild(liner);
     row.appendChild(meta);
     row.addEventListener('click', () => loadDetail(r.run_id));
     runsListEl.appendChild(row);
@@ -204,16 +398,80 @@ function escapeHtml(s){
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 }
 
+function unwrapPreview(preview){
+  if (!preview) return { text: '' };
+  // Try to extract text field from JSON.stringify({"content":[{"type":"text","text":"..."}]})
+  const full = preview.match(/"text":"((?:[^"\\]|\\.)*)"/);
+  if (full) {
+    let text;
+    try { text = JSON.parse('"' + full[1] + '"'); }
+    catch { text = full[1].replace(/\\n/g,'\n').replace(/\\t/g,'\t').replace(/\\"/g,'"').replace(/\\\\/g,'\\'); }
+    return { text };
+  }
+  return { text: preview };
+}
+
 function renderTrace(trace){
   if (!trace || !trace.length) return '<em style="color:#999">No tool calls recorded.</em>';
-  return trace.map(t => {
-    const cls = t.kind === 'call' ? 'trace-call' : 'trace-return';
-    const arrow = t.kind === 'call' ? '→' : '←';
-    const body = t.kind === 'call'
-      ? t.tool + '(' + JSON.stringify(t.args) + ')'
-      : t.tool + ' returned: ' + (t.preview || '');
-    return '<div class="trace-item ' + cls + '">' + arrow + ' ' + escapeHtml(body) + '</div>';
+  return trace.map((t, i) => {
+    if (t.kind === 'call') {
+      const cmd = (t.args && t.args.command) ? t.args.command : JSON.stringify(t.args || {}, null, 2);
+      return `<div class="trace-entry trace-entry-call">
+        <div class="trace-header">
+          <span class="trace-tool-pill">${escapeHtml(t.tool)}</span>
+          <span class="trace-dir">→ call</span>
+          <span class="trace-seq">#${i+1}</span>
+        </div>
+        <pre class="trace-cmd">${escapeHtml(cmd)}</pre>
+      </div>`;
+    } else {
+      const { text } = unwrapPreview(t.preview || '');
+      const errClass = t.isError ? ' trace-error' : '';
+      return `<div class="trace-entry trace-entry-result${errClass}">
+        <div class="trace-header">
+          <span class="trace-tool-pill">${escapeHtml(t.tool || 'result')}</span>
+          <span class="trace-dir">← result</span>
+          <span class="trace-seq">#${i+1}</span>
+        </div>
+        ${t.isError ? '<div class="trace-err-badge">⚠ error</div>' : ''}
+        <pre class="trace-out-text">${escapeHtml(text)}</pre>
+      </div>`;
+    }
   }).join('');
+}
+
+function buildDataQualityFlags(rec){
+  const flags = [];
+  const triage = rec.triage || {};
+  const trace = rec.tool_trace || [];
+  const previewText = trace.filter(t => t.kind === 'result').map(t => (t.preview || '').toLowerCase()).join(' ');
+
+  if ((triage.greptile_score === null || triage.greptile_score === undefined) && previewText.includes('greptile')) {
+    flags.push({ level:'warn', msg:'greptile_score=null but greptile content visible in tool trace — agent likely saw the comment but failed to extract a numeric score (look for "Confidence Score: X/5" format in the result previews below)' });
+  }
+  const summary = triage.pr_summary || '';
+  if (/^(I'(ll|m)|I will|Let me|I'll start|I need to)/i.test(summary)) {
+    flags.push({ level:'warn', msg:'pr_summary contains agent reasoning prose instead of a clean description — JSON extraction succeeded but pr_summary field was populated with the agent\'s internal monologue' });
+  }
+  const title = triage.pr_title || '';
+  if (title.startsWith('http')) {
+    flags.push({ level:'warn', msg:'pr_title echoes the URL — agent failed to extract the real PR title from the GitHub API response' });
+  }
+  if (!triage.pr_author) {
+    flags.push({ level:'info', msg:'pr_author is empty — GitHub API may have returned an unexpected shape or the field was missed during extraction' });
+  }
+  if (triage.files_changed === 0 && previewText.includes('modified')) {
+    flags.push({ level:'info', msg:'files_changed=0 but tool trace shows file modifications — this field is always overwritten server-side (known behavior)' });
+  }
+  return flags;
+}
+
+function renderDataQualityFlags(flags){
+  if (!flags.length) return '';
+  return '<div class="dq-flags">' + flags.map(f => {
+    const icon = f.level === 'warn' ? '⚠' : 'ℹ';
+    return `<div class="dq-flag dq-${f.level}"><span class="dq-icon">${icon}</span><span>${escapeHtml(f.msg)}</span></div>`;
+  }).join('') + '</div>';
 }
 
 // --- Full pydantic_ai message renderer ---------------------------------------
@@ -321,6 +579,8 @@ document.addEventListener('click', (e) => {
 });
 
 let activeArm = 'triage';
+let runChatThreadId = null;
+let runChatSending = false;
 
 function switchArm(arm, rec){
   activeArm = arm;
@@ -329,6 +589,176 @@ function switchArm(arm, rec){
   if (armBox) armBox.innerHTML = renderArm(messages, arm);
   for (const btn of document.querySelectorAll('.arm-tab')) {
     btn.classList.toggle('active', btn.dataset.arm === arm);
+  }
+}
+
+function buildDebugDump(rec){
+  const card = rec.card || {};
+  const lines = [];
+  lines.push('=== RUN DEBUG DUMP ===');
+  lines.push('PR:       ' + rec.pr_url);
+  lines.push('Title:    #' + rec.pr_number + ' ' + (rec.pr_title || ''));
+  lines.push('Author:   ' + (rec.pr_author || ''));
+  lines.push('Reviewed: ' + fmtTime(rec.ts));
+  lines.push('Duration: ' + fmtDuration(rec.duration_s));
+  lines.push('Source:   ' + (rec.source || ''));
+  lines.push('LiteLLM session_id: ' + rec.run_id);
+  lines.push('');
+  lines.push('=== VERDICT ===');
+  lines.push((card.emoji || '') + ' ' + card.score + '/5 ' + (card.verdict || ''));
+  if (card.verdict_one_liner) lines.push(card.verdict_one_liner);
+  if (card.justification) lines.push(card.justification);
+  lines.push('');
+  lines.push('=== CARD TEXT ===');
+  lines.push(renderCardText(card));
+  lines.push('');
+  lines.push('=== DRILLDOWN ===');
+  lines.push(renderDrilldownText(rec));
+  lines.push('');
+  lines.push('=== TRIAGE REPORT (structured JSON) ===');
+  lines.push(JSON.stringify(rec.triage || {}, null, 2));
+  lines.push('');
+  lines.push('=== PATTERN REPORT (structured JSON) ===');
+  lines.push(JSON.stringify(rec.pattern || {}, null, 2));
+  lines.push('');
+  if (rec.karpathy_check && Object.keys(rec.karpathy_check).length) {
+    lines.push('=== KARPATHY CHECK (structured JSON) ===');
+    lines.push(JSON.stringify(rec.karpathy_check, null, 2));
+    lines.push('');
+  }
+  lines.push('=== TOOL TRACE ===');
+  const trace = rec.tool_trace || [];
+  if (!trace.length) {
+    lines.push('(none)');
+  } else {
+    for (const t of trace) {
+      if (t.kind === 'call') {
+        lines.push('→ ' + t.tool + '(' + JSON.stringify(t.args) + ')');
+      } else {
+        lines.push('← ' + t.tool + ' returned: ' + (t.preview || ''));
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+async function copyDebugDump(rec){
+  const btn = document.getElementById('copy-dump-btn');
+  const text = buildDebugDump(rec);
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy debug dump'; btn.classList.remove('copied'); }, 2000);
+  } catch {
+    // fallback: select a textarea
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy debug dump'; btn.classList.remove('copied'); }, 2000);
+  }
+}
+
+async function sendRunChat(rec) {
+  if (runChatSending) return;
+  const input = document.getElementById('chat-input');
+  const followups = document.getElementById('conv-followups');
+  const convBody = document.getElementById('conv-body');
+  if (!input || !followups) return;
+  const msg = input.value.trim();
+  if (!msg) return;
+
+  runChatSending = true;
+  input.value = '';
+  input.disabled = true;
+
+  const fullMsg = msg;
+
+  // Render user bubble
+  const userDiv = document.createElement('div');
+  userDiv.className = 'conv-fu-user';
+  userDiv.innerHTML = `<div class="conv-fu-who">You</div><div class="conv-fu-bubble">${escapeHtml(msg)}</div>`;
+  followups.appendChild(userDiv);
+
+  // Thinking indicator
+  const thinkDiv = document.createElement('div');
+  thinkDiv.className = 'conv-fu-bot';
+  thinkDiv.innerHTML = `<div class="conv-thinking"><span class="conv-dot"></span><span class="conv-dot"></span><span class="conv-dot"></span></div>`;
+  followups.appendChild(thinkDiv);
+  convBody.scrollTop = convBody.scrollHeight;
+
+  try {
+    const threadId = runChatThreadId ?? (crypto.randomUUID().replace(/-/g, ''));
+    const r = await authFetch('/chat/stream', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        message: fullMsg,
+        thread_id: threadId,
+        title: `PR #${rec.pr_number} ${rec.pr_title}`,
+        run_id: rec.run_id,
+      }),
+    });
+    runChatThreadId = threadId;
+
+    if (!r.ok) {
+      thinkDiv.className = 'conv-fu-err';
+      thinkDiv.textContent = 'Error: HTTP ' + r.status;
+      return;
+    }
+
+    thinkDiv.className = 'conv-fu-bot';
+    thinkDiv.innerHTML = '';
+    let botText = '';
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+        if (evt.type === 'text_delta') {
+          botText += evt.delta;
+          thinkDiv.textContent = botText;
+        } else if (evt.type === 'done') {
+          thinkDiv.textContent = evt.output || botText;
+        } else if (evt.type === 'tool_call' || evt.type === 'tool_result' || evt.type === 'progress') {
+          const toolDiv = document.createElement('div');
+          toolDiv.className = 'conv-fu-tool';
+          toolDiv.textContent = evt.type === 'tool_call'
+            ? '→ ' + evt.tool
+            : evt.type === 'tool_result'
+            ? '← ' + evt.tool + (evt.isError ? ' ERROR' : '') + ': ' + evt.preview
+            : '⋯ ' + evt.text;
+          followups.insertBefore(toolDiv, thinkDiv);
+        } else if (evt.type === 'error') {
+          thinkDiv.className = 'conv-fu-err';
+          thinkDiv.textContent = evt.message;
+        }
+        convBody.scrollTop = convBody.scrollHeight;
+      }
+    }
+  } catch (err) {
+    thinkDiv.className = 'conv-fu-err';
+    thinkDiv.textContent = String(err);
+  } finally {
+    runChatSending = false;
+    input.disabled = false;
+    input.focus();
+    convBody.scrollTop = convBody.scrollHeight;
   }
 }
 
@@ -372,6 +802,11 @@ function renderDetail(rec){
         <a href="${escapeHtml(rec.pr_url)}" target="_blank" class="pr-link">View on GitHub ↗</a>
         <span>${fmtTime(rec.ts)} · ${fmtDuration(rec.duration_s)} · ${fmtCost(rec.cost_usd)}${tokenLine}</span>
         <span>${escapeHtml(rec.model_name || '')}${logfireLink(rec)}</span>
+        <button id="copy-dump-btn" class="copy-btn" type="button">Copy debug dump</button>
+        ${rec.is_staged
+          ? `<button id="revert-btn" class="copy-btn revert-btn" type="button">Revert from staging ✕</button>`
+          : `<button id="merge-btn" class="copy-btn merge-btn" type="button">Merge to staging ↗</button>`}
+        <span id="merge-branch-label" class="merge-branch-label">${rec.is_staged && rec.staging_pr_url ? '→ <a href="' + escapeHtml(rec.staging_pr_url) + '" target="_blank" style="color:#0a5">PR #' + rec.staging_pr_number + ' ↗</a>' : ''}</span>
       </div>
     </div>
     <div class="detail-body">
@@ -384,6 +819,21 @@ function renderDetail(rec){
           <h3>Drill-down</h3>
           <div class="drilldown-text">${escapeHtml(drilldown)}</div>
         </div>
+        ${renderDataQualityFlags(buildDataQualityFlags(rec))}
+        <details class="json-section">
+          <summary>Triage report (full JSON)</summary>
+          <div class="json-body"><pre>${escapeHtml(JSON.stringify(rec.triage || {}, null, 2))}</pre></div>
+        </details>
+        ${(rec.pattern && (rec.pattern.findings || []).length) ? `
+        <details class="json-section">
+          <summary>Pattern report (full JSON)</summary>
+          <div class="json-body"><pre>${escapeHtml(JSON.stringify(rec.pattern, null, 2))}</pre></div>
+        </details>` : ''}
+        ${(rec.karpathy_check && Object.keys(rec.karpathy_check).length) ? `
+        <details class="json-section">
+          <summary>Karpathy check (full JSON)</summary>
+          <div class="json-body"><pre>${escapeHtml(JSON.stringify(rec.karpathy_check, null, 2))}</pre></div>
+        </details>` : ''}
         <div class="section">
           <h3>Tool trace (skim)</h3>
           ${renderTrace(rec.tool_trace)}
@@ -398,6 +848,7 @@ function renderDetail(rec){
             Annotation
             <span class="count label-${rec.human_label || 'empty'}">${escapeHtml(labelTagText)}</span>
           </button>
+          <button class="right-tab" data-rtab="chat" type="button">Chat</button>
         </div>
         <div class="right-pane" data-pane="trace">
           <div class="trace-controls">
@@ -427,9 +878,40 @@ function renderDetail(rec){
             </div>
           </div>
         </div>
+        <div class="right-pane hidden" data-pane="chat" style="padding:0;overflow:hidden">
+          <div class="conv-wrap">
+            <div class="conv-body" id="conv-body">
+              <div class="conv-trigger">
+                <div class="conv-trigger-who">
+                  <span class="conv-trigger-badge">${escapeHtml(rec.source || 'webhook')}</span>
+                  ${rec.ts ? fmtTime(rec.ts) : ''}
+                </div>
+                <div class="conv-trigger-title"><a href="${escapeHtml(rec.pr_url)}" target="_blank">#${rec.pr_number} ${escapeHtml(rec.pr_title)}</a></div>
+              </div>
+              <div class="conv-agent-block">
+                <div class="conv-agent-meta">
+                  <div class="conv-agent-avatar">◆</div>
+                  <div class="conv-worked">Worked for <strong>${fmtDuration(rec.duration_s)}</strong> · ${fmtCost(rec.cost_usd)}</div>
+                </div>
+                <div class="conv-agent-text">${escapeHtml(renderCardText(rec.card || {}))}</div>
+              </div>
+              <div class="conv-followups" id="conv-followups"></div>
+            </div>
+            <div class="conv-input-area">
+              <textarea class="conv-input-box" id="chat-input" rows="1" placeholder="Add a follow up…"></textarea>
+              <div class="conv-input-hint">Enter to send · Shift+Enter for newline</div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   `;
+  document.getElementById('copy-dump-btn').addEventListener('click', () => copyDebugDump(rec));
+  if (rec.is_staged) {
+    document.getElementById('revert-btn').addEventListener('click', () => revertFromStagingBranch(rec.pr_number, rec.pr_url));
+  } else {
+    document.getElementById('merge-btn').addEventListener('click', () => mergePrToStagingBranch(rec.pr_number, rec.pr_url));
+  }
   document.getElementById('save-btn').addEventListener('click', () => saveLabel(rec.run_id));
   document.getElementById('graduate-btn').addEventListener('click', () => graduate(rec.run_id));
   for (const btn of document.querySelectorAll('.arm-tab')) {
@@ -440,6 +922,10 @@ function renderDetail(rec){
   }
   document.getElementById('toggle-all-btn').addEventListener('click', toggleAllParts);
   activeArm = 'triage';
+  runChatThreadId = null;
+  document.getElementById('chat-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRunChat(rec); }
+  });
 }
 
 // Toggle every part-body in the active arm. Tracks state on the button
@@ -517,6 +1003,62 @@ function renderDrilldownText(rec){
   }
   if (lines.length === 1) lines.push('Nothing to drill into. Card has the full story.');
   return lines.join('\n');
+}
+
+async function mergePrToStagingBranch(prNumber, prUrl){
+  const btn = document.getElementById('merge-btn');
+  const branchLabel = document.getElementById('merge-branch-label');
+  const match = prUrl.match(/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/);
+  if (!match) { alert('Could not parse repo from PR URL: ' + prUrl); return; }
+  const repo = match[1];
+  btn.disabled = true;
+  btn.textContent = 'Merging…';
+  btn.className = 'copy-btn merge-btn merging';
+  branchLabel.textContent = '';
+  try {
+    const r = await authFetch(`/api/v1/prs/${prNumber}/merge-to-agent-branch?repo=${encodeURIComponent(repo)}`, { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+    btn.textContent = 'Merged ✓';
+    btn.className = 'copy-btn merge-btn merged';
+    branchLabel.innerHTML = '→ <a href="' + data.staging_pr_url + '" target="_blank" style="color:#0a5">PR #' + data.staging_pr_number + ' ↗</a> (' + data.branch + ')';
+  } catch (err) {
+    btn.textContent = 'Merge failed ✗';
+    btn.className = 'copy-btn merge-btn merge-error';
+    branchLabel.textContent = String(err);
+    branchLabel.style.color = '#c00';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function revertFromStagingBranch(prNumber, prUrl){
+  const btn = document.getElementById('revert-btn');
+  const branchLabel = document.getElementById('merge-branch-label');
+  const match = prUrl.match(/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/);
+  if (!match) { alert('Could not parse repo from PR URL: ' + prUrl); return; }
+  const repo = match[1];
+  if (!confirm('Revert PR #' + prNumber + ' from staging? This rebuilds the staging branch.')) return;
+  btn.disabled = true;
+  btn.textContent = 'Reverting…';
+  btn.className = 'copy-btn revert-btn reverting';
+  branchLabel.textContent = '';
+  try {
+    const r = await authFetch(`/api/v1/prs/${prNumber}/staging-merge?repo=${encodeURIComponent(repo)}`, { method: 'DELETE' });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+    btn.textContent = 'Reverted ✓';
+    btn.className = 'copy-btn revert-btn reverted';
+    branchLabel.textContent = `staging rebuilt (${data.mergesReplayed} PR${data.mergesReplayed === 1 ? '' : 's'} remaining)`;
+    branchLabel.style.color = '#666';
+  } catch (err) {
+    btn.textContent = 'Revert failed ✗';
+    btn.className = 'copy-btn revert-btn revert-error';
+    branchLabel.textContent = String(err);
+    branchLabel.style.color = '#c00';
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function loadDetail(runId){
@@ -601,5 +1143,341 @@ async function refresh(){
     loadDetail(runs[0].run_id);
   }
 })();
+
+// --- View tabs (Runs / Staging PRs) ------------------------------------------
+
+let activeView = 'runs';
+
+function setView(view) {
+  activeView = view;
+  const isRuns = view === 'runs';
+  const isAgent = view === 'agent';
+  const isStagingPrs = view === 'staging-prs';
+  const isAutoMerged = view === 'auto-merged';
+  document.getElementById('filter-tabs').style.display = isRuns ? '' : 'none';
+  document.getElementById('backfill-row').style.display = isRuns ? '' : 'none';
+  document.getElementById('backfill-status').style.display = isRuns ? '' : 'none';
+  document.getElementById('staging-controls').style.display = isStagingPrs ? 'flex' : 'none';
+  document.getElementById('runs-list').style.display = isRuns ? '' : 'none';
+  document.getElementById('staging-prs-list').style.display = isStagingPrs ? 'block' : 'none';
+  document.getElementById('auto-merged-list').style.display = isAutoMerged ? 'block' : 'none';
+  document.getElementById('agent-panel').style.display = isAgent ? 'block' : 'none';
+  document.getElementById('sidebar-title').textContent = isRuns ? 'Agent runs' : isStagingPrs ? 'Staging PRs' : isAutoMerged ? 'Auto-merged PRs' : 'Agent';
+  if (!isRuns) {
+    emptyDetailEl.style.display = 'flex';
+    detailEl.style.display = 'none';
+    activeRunId = null;
+    if (isStagingPrs) loadStagingPrs();
+    if (isAutoMerged) loadAutoMerges();
+    if (isAgent) loadAgentInfo();
+    else { agentInfoData = null; activeAgentItem = null; }
+  }
+  for (const t of document.querySelectorAll('.view-tab'))
+    t.classList.toggle('active', t.dataset.view === view);
+}
+
+let agentInfoData = null;
+let activeAgentItem = null;
+
+function renderAgentPanel(data) {
+  agentInfoData = data;
+  activeAgentItem = null;
+  const panel = document.getElementById('agent-panel');
+  const tools = data.tools || [];
+  const skills = data.skills || [];
+  let html = '';
+
+  html += '<div class="date-group">MCP Tools</div>';
+  if (!tools.length) {
+    html += '<div class="empty">No tools found — check LITELLM_API_BASE.</div>';
+  } else {
+    for (let i = 0; i < tools.length; i++) {
+      const t = tools[i];
+      html += `<div class="run-row" data-agent-type="tool" data-agent-idx="${i}">` +
+        `<div class="run-top">` +
+        `<span style="width:8px;height:8px;border-radius:50%;background:#5b8;flex-shrink:0;display:inline-block"></span>` +
+        `<span class="run-title" style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px">${escapeHtml(t.name)}</span>` +
+        `</div>` +
+        `<div class="run-liner">${escapeHtml(t.description)}</div>` +
+        `</div>`;
+    }
+  }
+
+  html += '<div class="date-group">Skills</div>';
+  if (!skills.length) {
+    html += '<div class="empty">No skills found.</div>';
+  } else {
+    for (let i = 0; i < skills.length; i++) {
+      const s = skills[i];
+      const firstSentence = s.description.split(/\.\s/)[0] + (s.description.includes('. ') ? '.' : '');
+      html += `<div class="run-row" data-agent-type="skill" data-agent-idx="${i}">` +
+        `<div class="run-top">` +
+        `<span style="width:8px;height:8px;border-radius:50%;background:#88a;flex-shrink:0;display:inline-block"></span>` +
+        `<span class="run-title" style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px">${escapeHtml(s.title)}</span>` +
+        `</div>` +
+        `<div class="run-liner">${escapeHtml(firstSentence)}</div>` +
+        `</div>`;
+    }
+  }
+
+  panel.innerHTML = html;
+
+  for (const row of panel.querySelectorAll('.run-row[data-agent-type]')) {
+    row.addEventListener('click', () => {
+      const type = row.dataset.agentType;
+      const idx = parseInt(row.dataset.agentIdx, 10);
+      for (const r of panel.querySelectorAll('.run-row')) r.classList.remove('active');
+      row.classList.add('active');
+      activeAgentItem = { type, idx };
+      if (type === 'tool') renderAgentToolDetail(agentInfoData.tools[idx]);
+      else renderAgentSkillDetail(agentInfoData.skills[idx]);
+    });
+  }
+}
+
+function renderAgentToolDetail(tool) {
+  emptyDetailEl.style.display = 'none';
+  detailEl.style.display = 'block';
+  const schema = tool.inputSchema ? JSON.stringify(tool.inputSchema, null, 2) : '{}';
+  const props = tool.inputSchema?.properties || {};
+  const required = new Set(tool.inputSchema?.required || []);
+  const paramRows = Object.entries(props).map(([k, v]) => {
+    const req = required.has(k) ? '<span style="color:#c00;margin-left:4px">*</span>' : '';
+    const type = v.type || (v.enum ? 'enum' : '');
+    const desc = v.description || (v.enum ? v.enum.join(' | ') : '');
+    return `<tr>
+      <td style="padding:6px 10px;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:nowrap;vertical-align:top">${escapeHtml(k)}${req}</td>
+      <td style="padding:6px 10px;font-size:11px;color:#888;vertical-align:top">${escapeHtml(type)}</td>
+      <td style="padding:6px 10px;font-size:12px;color:#444;vertical-align:top">${escapeHtml(desc)}</td>
+    </tr>`;
+  }).join('');
+
+  detailEl.innerHTML = `
+    <div class="detail-header">
+      <div class="detail-head">
+        <h1 style="font-family:ui-monospace,Menlo,monospace;font-size:16px">${escapeHtml(tool.name)}</h1>
+        <span class="scope-tag scope-slack">MCP Tool</span>
+      </div>
+      <div class="detail-meta">${escapeHtml(tool.description)}</div>
+    </div>
+    <div class="detail-left" style="padding:20px 28px 40px">
+      ${paramRows ? `<div class="section">
+        <h3>Parameters</h3>
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr style="border-bottom:1px solid #e0e0e3">
+            <th style="padding:4px 10px;text-align:left;font-size:11px;color:#888;font-weight:600;text-transform:uppercase">Name</th>
+            <th style="padding:4px 10px;text-align:left;font-size:11px;color:#888;font-weight:600;text-transform:uppercase">Type</th>
+            <th style="padding:4px 10px;text-align:left;font-size:11px;color:#888;font-weight:600;text-transform:uppercase">Description</th>
+          </tr></thead>
+          <tbody>${paramRows}</tbody>
+        </table>
+      </div>` : ''}
+      <details class="json-section">
+        <summary>Input schema (full JSON)</summary>
+        <div class="json-body"><pre>${escapeHtml(schema)}</pre></div>
+      </details>
+    </div>
+  `;
+}
+
+function renderAgentSkillDetail(skill) {
+  emptyDetailEl.style.display = 'none';
+  detailEl.style.display = 'block';
+  detailEl.innerHTML = `
+    <div class="detail-header">
+      <div class="detail-head">
+        <h1 style="font-family:ui-monospace,Menlo,monospace;font-size:16px">${escapeHtml(skill.title)}</h1>
+        <span class="scope-tag scope-eval">Skill</span>
+      </div>
+    </div>
+    <div class="detail-left" style="padding:20px 28px 40px">
+      <div class="section">
+        <h3>Description</h3>
+        <div class="card-text">${escapeHtml(skill.description)}</div>
+      </div>
+    </div>
+  `;
+}
+
+async function loadAgentInfo() {
+  const panel = document.getElementById('agent-panel');
+  panel.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const r = await authFetch('/api/agent-info');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    renderAgentPanel(await r.json());
+  } catch (err) {
+    panel.innerHTML = '<div class="empty err">' + escapeHtml(String(err)) + '</div>';
+  }
+}
+
+for (const tab of document.querySelectorAll('.view-tab')) {
+  tab.addEventListener('click', () => setView(tab.dataset.view));
+}
+
+// --- Staging PRs -------------------------------------------------------------
+
+function fmtRelative(iso) {
+  const diff = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 60) return m + 'm ago';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h ago';
+  return Math.floor(h / 24) + 'd ago';
+}
+
+async function loadStagingPrs() {
+  const listEl = document.getElementById('staging-prs-list');
+  const statusEl = document.getElementById('staging-status');
+  statusEl.textContent = 'Loading…';
+  try {
+    const r = await authFetch('/api/v1/staging-prs?repo=BerriAI/litellm');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const prs = await r.json();
+    statusEl.textContent = prs.length + ' open';
+    if (!prs.length) {
+      listEl.innerHTML = '<div class="empty">No open staging PRs.</div>';
+      return;
+    }
+    listEl.innerHTML = prs.map(pr => `
+      <a class="staging-row" href="${escapeHtml(pr.html_url)}" target="_blank" rel="noopener">
+        <div class="staging-row-top">
+          <span class="staging-pr-num">#${pr.number}</span>
+          <span class="staging-pr-title">${escapeHtml(pr.title)}</span>
+          <span class="staging-pr-branch">${escapeHtml(pr.branch.replace('litellm_agent_oss_staging_', ''))}</span>
+        </div>
+        <div class="staging-pr-meta">${escapeHtml(pr.author)} · updated ${fmtRelative(pr.updated_at)} · → ${escapeHtml(pr.base)}</div>
+      </a>
+    `).join('');
+  } catch (err) {
+    statusEl.textContent = '';
+    listEl.innerHTML = '<div class="empty err">' + escapeHtml(String(err)) + '</div>';
+  }
+}
+
+document.getElementById('staging-refresh-btn').addEventListener('click', loadStagingPrs);
+
+// --- Auto-merged PRs ---------------------------------------------------------
+
+async function loadAutoMerges() {
+  const listEl = document.getElementById('auto-merged-list');
+  listEl.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const r = await authFetch('/api/v1/auto-merges?limit=200');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const merges = await r.json();
+    if (!merges.length) {
+      listEl.innerHTML = '<div class="empty">No auto-merged PRs yet.</div>';
+      return;
+    }
+    const todayStr = new Date().toDateString();
+    let lastGroup = null;
+    let html = '';
+    for (const m of merges) {
+      const d = new Date(m.merged_at_epoch * 1000);
+      const group = dateGroupLabel(m.merged_at_epoch);
+      if (group !== lastGroup) {
+        html += `<div class="date-group">${escapeHtml(group)}</div>`;
+        lastGroup = group;
+      }
+      const prUrl = `https://github.com/${escapeHtml(m.repo)}/pull/${m.pr_number}`;
+      const title = m.pr_title && !m.pr_title.startsWith('http')
+        ? escapeHtml(m.pr_title)
+        : '#' + m.pr_number;
+      const time = d.toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+      const isToday = d.toDateString() === todayStr;
+      const isReverted = !!m.reverted_at_epoch;
+      const stagingLink = m.staging_pr_url
+        ? `<a href="${escapeHtml(m.staging_pr_url)}" target="_blank" rel="noopener" style="color:#0a5">Staging PR #${m.staging_pr_number} ↗</a>`
+        : '—';
+      const badge = isReverted
+        ? `<span class="auto-merged-badge" style="background:#f5e6e6;color:#b00">reverted</span>`
+        : `<span class="auto-merged-badge">merged</span>`;
+      const revertBtn = isToday && !isReverted
+        ? `<button class="revert-row-btn copy-btn revert-btn" style="margin-left:auto;padding:3px 8px;font-size:11px" data-pr="${m.pr_number}" data-repo="${escapeHtml(m.repo)}" type="button">Revert ✕</button>`
+        : '';
+      const hasRun = !!m.run_id;
+      html += `<div class="auto-merged-row${hasRun ? ' has-run' : ''}" data-merge-id="${m.id}"${hasRun ? ` data-run-id="${escapeHtml(m.run_id)}"` : ''}>
+        <div class="staging-row-top">
+          <span class="staging-pr-num">#${m.pr_number}</span>
+          <span class="staging-pr-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:13px;font-weight:500">${title}</span>
+          ${badge}
+          ${revertBtn}
+        </div>
+        <div class="staging-pr-meta">${m.pr_author ? escapeHtml(m.pr_author) + ' · ' : ''}${time} · ${stagingLink}${hasRun ? ' · <span style="color:#06c;font-size:11px">View run →</span>' : ''}</div>
+      </div>`;
+    }
+    listEl.innerHTML = html;
+  } catch (err) {
+    listEl.innerHTML = '<div class="empty err">' + escapeHtml(String(err)) + '</div>';
+  }
+}
+
+async function handleAutoMergedRevert(e) {
+  const btn = e.target.closest('.revert-row-btn');
+  if (!btn) return;
+  const prNumber = btn.dataset.pr;
+  const repo = btn.dataset.repo;
+  if (!confirm('Revert PR #' + prNumber + ' from staging? This rebuilds the staging branch.')) return;
+  btn.disabled = true;
+  btn.textContent = 'Reverting…';
+  btn.className = 'copy-btn revert-btn reverting';
+  try {
+    const r = await authFetch(`/api/v1/prs/${prNumber}/staging-merge?repo=${encodeURIComponent(repo)}`, { method: 'DELETE' });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+    btn.textContent = 'Reverted ✓';
+    btn.className = 'copy-btn revert-btn reverted';
+    const row = btn.closest('.auto-merged-row');
+    const badge = row.querySelector('.auto-merged-badge');
+    if (badge) { badge.textContent = 'reverted'; badge.style.cssText = 'background:#f5e6e6;color:#b00'; }
+    btn.remove();
+  } catch (err) {
+    btn.textContent = 'Failed ✗';
+    btn.className = 'copy-btn revert-btn revert-error';
+    btn.disabled = false;
+  }
+}
+
+// --- Filter tabs --------------------------------------------------------------
+for (const tab of document.querySelectorAll('.filter-tab')) {
+  tab.addEventListener('click', () => {
+    activeFilter = tab.dataset.filter;
+    for (const t of document.querySelectorAll('.filter-tab')) t.classList.toggle('active', t.dataset.filter === activeFilter);
+    renderRunsList();
+  });
+}
+
+// --- Auto-merged revert delegation + run navigation --------------------------
+document.getElementById('auto-merged-list').addEventListener('click', (e) => {
+  handleAutoMergedRevert(e);
+  if (e.target.closest('.revert-row-btn')) return;
+  const row = e.target.closest('.auto-merged-row');
+  if (!row || !row.dataset.runId) return;
+  loadDetail(row.dataset.runId);
+});
+
+// --- Backfill button ----------------------------------------------------------
+document.getElementById('backfill-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('backfill-btn');
+  const statusEl = document.getElementById('backfill-status');
+  const limit = parseInt(document.getElementById('backfill-limit').value, 10) || 20;
+  btn.disabled = true;
+  statusEl.style.color = '#888';
+  statusEl.textContent = 'Queuing…';
+  try {
+    const r = await authFetch(`/api/v1/backfill?limit=${limit}&repo=BerriAI/litellm`, { method: 'POST' });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + await r.text());
+    const data = await r.json();
+    statusEl.style.color = '#0a5';
+    statusEl.textContent = `Queued ${data.queued} PRs. Runs will appear as they complete.`;
+    setTimeout(() => refresh(), 10000);
+  } catch (err) {
+    statusEl.style.color = '#c00';
+    statusEl.textContent = String(err);
+  } finally {
+    btn.disabled = false;
+  }
+});
 </script>
 </body></html>

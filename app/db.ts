@@ -113,7 +113,8 @@ export async function listRunsSummary(opts: {
            source, duration_s, cost_usd, human_label,
            card->>'score' AS score_str,
            card->>'verdict' AS verdict,
-           card->>'emoji' AS emoji
+           card->>'emoji' AS emoji,
+           card->>'verdict_one_liner' AS verdict_one_liner
     FROM runs ${whereSql}
     ORDER BY ts DESC LIMIT $${args.length}
   `;
@@ -268,6 +269,189 @@ export async function deleteEvalPr(setName: string, prId: number): Promise<boole
     "DELETE FROM eval_prs WHERE set_name = $1 AND id = $2", [setName, prId]
   );
   return (rowCount ?? 0) > 0;
+}
+
+// Watchdog: flips runs whose karpathy_check is still "running" past the
+// staleness window into "killed", recording when the flip happened. Catches
+// the case where the host process was terminated mid-flight (Render
+// redeploy, OOM, SIGTERM) and the post-karpathy upsert in reviewPr never
+// executed. Without this, the row sits in "running" forever and looks
+// indistinguishable from a real in-flight run.
+//
+// Returns the count flipped. Caller logs that count.
+export async function flipStuckKarpathyToKilled(staleSeconds = 600): Promise<number> {
+  const { rowCount } = await pool().query(
+    `UPDATE runs
+     SET karpathy_check = karpathy_check
+       || jsonb_build_object(
+            'status', 'killed',
+            'flipped_at', EXTRACT(EPOCH FROM NOW())::float8
+          )
+     WHERE karpathy_check->>'status' = 'running'
+       AND (karpathy_check->>'started_at')::float8
+           < EXTRACT(EPOCH FROM NOW())::float8 - $1`,
+    [staleSeconds],
+  );
+  return rowCount ?? 0;
+}
+
+export async function startBlockedWatch(runId: string): Promise<void> {
+  await pool().query(
+    `UPDATE runs SET blocked_watch_started_at = NOW() WHERE run_id = $1 AND blocked_watch_started_at IS NULL`,
+    [runId],
+  );
+}
+
+export async function resetBlockedWatch(runId: string): Promise<void> {
+  await pool().query(
+    `UPDATE runs SET blocked_watch_started_at = NOW() WHERE run_id = $1`,
+    [runId],
+  );
+}
+
+export async function listExpiredBlockedWatches(): Promise<Record<string, unknown>[]> {
+  const { rows } = await pool().query(`
+    SELECT run_id,
+           pr_url, pr_number,
+           EXTRACT(EPOCH FROM blocked_watch_started_at)::float8 AS blocked_watch_started_at_epoch,
+           blocked_watch_started_at
+    FROM runs
+    WHERE card->>'verdict' = 'BLOCKED'
+      AND blocked_watch_started_at IS NOT NULL
+      AND blocked_watch_started_at < NOW() - INTERVAL '7 days'
+  `);
+  return rows;
+}
+
+export async function deleteRun(runId: string): Promise<boolean> {
+  const { rowCount } = await pool().query(
+    `DELETE FROM runs WHERE run_id = $1`,
+    [runId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+// Returns true if this (pr_number, head_sha, repo) is new — caller should proceed.
+// Returns false if already claimed — caller should skip.
+export async function claimWebhookReview(prNumber: number, headSha: string, repo: string): Promise<boolean> {
+  const { rowCount } = await pool().query(
+    `INSERT INTO webhook_reviewed (pr_number, head_sha, repo) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+    [prNumber, headSha, repo]
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+// --- Staging merge helpers ---
+
+// Atomically claims a daily merge slot for prNumber/repo.
+// Uses a single CTE so the count check and INSERT are one round-trip with no TOCTOU gap.
+// Returns { claimed: true, countToday } if slot was taken (countToday = count before this insert).
+// Returns { claimed: false, countToday } if cap already reached or PR already staged.
+export async function claimStagingMergeSlot(
+  prNumber: number,
+  repo: string,
+  cap: number,
+): Promise<{ claimed: boolean; countToday: number }> {
+  const { rows } = await pool().query(
+    `WITH daily AS (
+       SELECT COUNT(*)::int AS cnt
+       FROM staging_merges
+       WHERE repo = $2
+         AND merged_at >= (CURRENT_DATE AT TIME ZONE 'UTC')
+         AND merged_at <  (CURRENT_DATE AT TIME ZONE 'UTC' + INTERVAL '1 day')
+     ),
+     ins AS (
+       INSERT INTO staging_merges (pr_number, repo)
+       SELECT $1, $2 WHERE (SELECT cnt FROM daily) < $3
+       ON CONFLICT (pr_number, repo) DO NOTHING
+       RETURNING id
+     )
+     SELECT (SELECT cnt FROM daily) AS count_today,
+            (SELECT id FROM ins)    AS inserted_id`,
+    [prNumber, repo, cap],
+  );
+  const row = rows[0];
+  return { claimed: row.inserted_id != null, countToday: row.count_today as number };
+}
+
+export async function isStagingMerged(prNumber: number, repo: string): Promise<boolean> {
+  const { rows } = await pool().query(
+    `SELECT 1 FROM staging_merges WHERE pr_number = $1 AND repo = $2 AND merge_commit_sha IS NOT NULL AND reverted_at IS NULL`,
+    [prNumber, repo],
+  );
+  return rows.length > 0;
+}
+
+export async function getStagingMergeInfo(
+  prNumber: number,
+  repo: string,
+): Promise<{ is_staged: boolean; staging_pr_url: string | null; staging_pr_number: number | null } | null> {
+  const { rows } = await pool().query(
+    `SELECT merge_commit_sha, staging_pr_url, staging_pr_number, reverted_at
+     FROM staging_merges WHERE pr_number = $1 AND repo = $2`,
+    [prNumber, repo],
+  );
+  if (!rows.length) return null;
+  const r = rows[0];
+  return {
+    is_staged: r.merge_commit_sha != null && r.reverted_at == null,
+    staging_pr_url: r.staging_pr_url ?? null,
+    staging_pr_number: r.staging_pr_number ?? null,
+  };
+}
+
+export async function markStagingMergeReverted(prNumber: number, repo: string): Promise<boolean> {
+  const { rowCount } = await pool().query(
+    `UPDATE staging_merges SET reverted_at = NOW()
+     WHERE pr_number = $1 AND repo = $2 AND reverted_at IS NULL AND merge_commit_sha IS NOT NULL`,
+    [prNumber, repo],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+export async function listTodayStagingMergesForRebuild(repo: string): Promise<{ pr_number: number }[]> {
+  const { rows } = await pool().query(
+    `SELECT pr_number FROM staging_merges
+     WHERE repo = $1
+       AND reverted_at IS NULL
+       AND merge_commit_sha IS NOT NULL
+       AND merged_at >= (CURRENT_DATE AT TIME ZONE 'UTC')
+       AND merged_at <  (CURRENT_DATE AT TIME ZONE 'UTC' + INTERVAL '1 day')
+     ORDER BY merged_at ASC`,
+    [repo],
+  );
+  return rows as { pr_number: number }[];
+}
+
+export async function listStagingMerges(limit = 100): Promise<Record<string, unknown>[]> {
+  const { rows } = await pool().query(
+    `SELECT sm.id, sm.pr_number, sm.repo, sm.run_id,
+            sm.staging_pr_url, sm.staging_pr_number, sm.merge_commit_sha,
+            EXTRACT(EPOCH FROM sm.merged_at)::float8 AS merged_at_epoch,
+            EXTRACT(EPOCH FROM sm.reverted_at)::float8 AS reverted_at_epoch,
+            r.pr_title, r.pr_author
+     FROM staging_merges sm
+     LEFT JOIN runs r ON sm.run_id = r.run_id
+     ORDER BY sm.merged_at DESC
+     LIMIT $1`,
+    [limit],
+  );
+  return rows;
+}
+
+
+// Fill in merge results after the GitHub merge API call succeeds.
+export async function updateStagingMergeResult(
+  prNumber: number,
+  repo: string,
+  result: { stagingPrUrl: string; stagingPrNumber: number; mergeCommitSha: string; runId: string },
+): Promise<void> {
+  await pool().query(
+    `UPDATE staging_merges
+     SET staging_pr_url = $3, staging_pr_number = $4, merge_commit_sha = $5, run_id = $6
+     WHERE pr_number = $1 AND repo = $2`,
+    [prNumber, repo, result.stagingPrUrl, result.stagingPrNumber, result.mergeCommitSha, result.runId],
+  );
 }
 
 export async function updateEvalPr(setName: string, prId: number, opts: {

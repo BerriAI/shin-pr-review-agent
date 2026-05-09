@@ -84,6 +84,13 @@ const CURSOR_MODEL = process.env.CURSOR_MODEL ?? "claude-sonnet-4-6";
 const LITELLM_REPO_URL =
   process.env.CURSOR_REPO_URL ?? "https://github.com/BerriAI/litellm";
 
+// Triage runs as a deterministic single-shot LLM call against the LiteLLM
+// proxy, NOT against cursor cloud. Cursor cloud is reserved for tasks that
+// need a sandboxed VM + repo clone (karpathy local fallback, chat sessions
+// that may invoke `review_pr`). Triage just needs a model with no tool loop.
+const TRIAGE_MODEL =
+  process.env.TRIAGE_MODEL ?? "anthropic/claude-sonnet-4-6";
+
 function envForward(): Record<string, string> {
   const out: Record<string, string> = {};
   for (const k of [
@@ -1732,6 +1739,95 @@ async function _cursorSingleShot(opts: {
   });
 }
 
+// Direct LiteLLM-proxy single-shot. Used by triage so the greptile/CI gate
+// doesn't burn a cursor-cloud agent (cold-start ~3s + dashboard noise) on
+// every PR. OpenAI-compatible /chat/completions endpoint.
+async function _litellmSingleShot(opts: {
+  systemPrompt: string;
+  userPrompt: string;
+  runId: string;
+  prUrl: string;
+  kind: string;
+  model?: string;
+}): Promise<string> {
+  const { systemPrompt, userPrompt, runId, prUrl, kind } = opts;
+  const model = opts.model ?? TRIAGE_MODEL;
+  const base = process.env.LITELLM_API_BASE?.replace(/\/+$/, "");
+  const key = process.env.LITELLM_API_KEY;
+  if (!base || !key) {
+    throw new Error(
+      "LITELLM_API_BASE or LITELLM_API_KEY not set (required for non-cursor LLM call)",
+    );
+  }
+  return llmTracer.startActiveSpan("chat litellm", async (span) => {
+    span.setAttributes({
+      [SemanticConventions.OPENINFERENCE_SPAN_KIND]: OpenInferenceSpanKind.LLM,
+      [SemanticConventions.LLM_SYSTEM]: "litellm",
+      [SemanticConventions.LLM_PROVIDER]: "litellm",
+      [SemanticConventions.LLM_MODEL_NAME]: model,
+      "pr.url": prUrl,
+      "pr.review.kind": kind,
+      "run.id": runId,
+    });
+    if (CAPTURE_PROMPTS) {
+      span.setAttribute(
+        SemanticConventions.INPUT_VALUE,
+        JSON.stringify([
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ]),
+      );
+      span.setAttribute(SemanticConventions.INPUT_MIME_TYPE, "application/json");
+    }
+    try {
+      const r = await fetch(`${base}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0,
+          metadata: { trace_id: runId, session_id: runId, tags: [kind] },
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
+        }),
+      });
+      if (!r.ok) {
+        const txt = await r.text();
+        throw new Error(
+          `litellm ${r.status} ${r.statusText}: ${txt.slice(0, 400)}`,
+        );
+      }
+      const json = (await r.json()) as any;
+      const content = json?.choices?.[0]?.message?.content ?? "";
+      const output =
+        typeof content === "string"
+          ? content
+          : Array.isArray(content)
+            ? content
+                .map((b: any) => (b?.type === "text" ? (b.text ?? "") : ""))
+                .join("")
+            : String(content);
+      if (CAPTURE_PROMPTS) {
+        span.setAttribute(SemanticConventions.OUTPUT_VALUE, output);
+        span.setAttribute(SemanticConventions.OUTPUT_MIME_TYPE, "text/plain");
+      }
+      span.setStatus({ code: SpanStatusCode.OK });
+      return output;
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
+}
+
 // --- Single-shot triage (local gather + one LLM call, no tool loop) ---------
 
 // Cap defends against unexpected gather-output bloat; typical real PRs land
@@ -1791,20 +1887,21 @@ async function _triageLlmCall(
   runId: string,
 ): Promise<string> {
   const userPrompt = _buildTriagePrompt(prUrl, gatherData);
-  log(`triage: single-shot Cursor agent call, prompt=${userPrompt.length} chars`);
+  log(
+    `triage: single-shot LiteLLM call (model=${TRIAGE_MODEL}), prompt=${userPrompt.length} chars`,
+  );
   dbg(
     `_triageLlmCall: gatherKeys=${Object.keys(gatherData).join(",")} ` +
       `greptile_score=${gatherData.greptile_score} ` +
       `failing=${(gatherData.failing_check_contexts as unknown[] | undefined)?.length ?? 0} ` +
       `diff_files=${(gatherData.diff_files as unknown[] | undefined)?.length ?? 0}`,
   );
-  return _cursorSingleShot({
+  return _litellmSingleShot({
     systemPrompt: TRIAGE_SYSTEM_SINGLE_SHOT,
     userPrompt,
     runId,
     prUrl,
     kind: "triage_single_shot",
-    agentName: "triage",
   });
 }
 

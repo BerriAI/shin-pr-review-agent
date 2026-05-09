@@ -3,15 +3,8 @@ import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  AuthStorage,
-  createAgentSession,
-  defineTool,
-  ModelRegistry,
-  SessionManager,
-  type AgentSession,
-  type ToolDefinition,
-} from "@mariozechner/pi-coding-agent";
+// @ts-ignore — @cursor/sdk ships types via ESM resolution
+import { Agent } from "@cursor/sdk";
 import { z } from "zod";
 import * as db from "./db.js";
 
@@ -23,103 +16,41 @@ const PATTERN_GATHER_SCRIPT = resolve(
   "../scripts/gather_pattern_local.py",
 );
 
-// --- Pi SDK shared infra (initialised once) -----------------------------------
+// --- Cursor SDK config --------------------------------------------------------
 
-export let authStorage!: AuthStorage;
-export let modelRegistry!: ModelRegistry;
+const CURSOR_API_KEY = process.env.CURSOR_API_KEY;
+const CURSOR_MODEL = process.env.CURSOR_MODEL ?? "claude-sonnet-4-6";
+const LITELLM_REPO_URL =
+  process.env.CURSOR_REPO_URL ?? "https://github.com/BerriAI/litellm";
 
-export async function initRegistry(): Promise<void> {
-  authStorage = AuthStorage.create();
-  modelRegistry = ModelRegistry.create(authStorage);
+type CursorAgent = any;
 
-  const base = process.env.LITELLM_API_BASE?.replace(/\/+$/, "");
-  const key = process.env.LITELLM_API_KEY;
-  if (!base || !key) {
-    return;
+function envForward(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of [
+    "LITELLM_API_BASE",
+    "LITELLM_API_KEY",
+    "GITHUB_TOKEN",
+  ]) {
+    const v = process.env[k];
+    if (v) out[k] = v;
   }
+  return out;
+}
 
-  const CHAT_MODEL_DROP = [
-    "dall-e",
-    "sora",
-    "whisper",
-    "tts",
-    "embedding",
-    "moderation",
-    "realtime",
-    "image",
-    "audio",
-    "transcribe",
-    "search-preview",
-    "search-api",
-    "deep-research",
-    "1024-x-",
-    "1536-x-",
-    "1792-x-",
-    "512-x-",
-    "256-x-",
-    "davinci-",
-    "babbage-",
-    "-instruct",
-    "chatgpt-image",
-  ];
-  function isChatModel(id: string): boolean {
-    if (id.endsWith("/*")) return false;
-    const lower = id.toLowerCase();
-    return !CHAT_MODEL_DROP.some((bad) => lower.includes(bad));
-  }
-
-  let modelIds: string[] = [];
-  try {
-    const r = await fetch(`${base}/v1/models`, {
-      headers: { Authorization: `Bearer ${key}` },
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const payload = (await r.json()) as { data?: Array<{ id: string }> };
-    modelIds = (payload.data ?? []).map((m) => m.id).filter(isChatModel);
-  } catch {
-    modelIds = ["openai/gpt-4o-mini"];
-  }
-  if (!modelIds.length) {
-    return;
-  }
-
-  modelRegistry.registerProvider("litellm", {
-    name: "LiteLLM",
-    baseUrl: `${base}/v1`,
-    apiKey: "LITELLM_API_KEY",
-    api: "openai-completions",
-    authHeader: true,
-    models: modelIds.map((id) => ({
-      id,
-      name: id,
-      reasoning: false,
-      input: ["text"] as ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 200000,
-      maxTokens: 8192,
-    })),
+async function newCloudAgent(name: string): Promise<CursorAgent> {
+  if (!CURSOR_API_KEY) throw new Error("CURSOR_API_KEY not set");
+  return Agent.create({
+    apiKey: CURSOR_API_KEY,
+    name,
+    model: { id: CURSOR_MODEL },
+    cloud: {
+      repos: [{ url: LITELLM_REPO_URL }],
+      envVars: envForward(),
+    },
   });
-
-  const preferred =
-    process.env.LITELLM_DEFAULT_MODEL ||
-    modelIds.find((id) => id === "anthropic/claude-sonnet-4-6") ||
-    modelIds.find((id) => id.startsWith("anthropic/claude-sonnet")) ||
-    modelIds.find((id) => id.startsWith("anthropic/claude")) ||
-    modelIds.find((id) => id.startsWith("openai/gpt-4")) ||
-    modelIds[0];
-  defaultModelId = preferred;
-  _litellmBase = base;
-  _litellmKey = key;
 }
 
-let defaultModelId: string | undefined;
-let _litellmBase: string | undefined;
-let _litellmKey: string | undefined;
-
-function defaultModel() {
-  if (!defaultModelId) return undefined;
-  return modelRegistry.find("litellm", defaultModelId);
-}
 
 // --- runPrompt helper ----------------------------------------------------------
 
@@ -134,99 +65,48 @@ export type StreamEvent =
   | { type: "progress"; text: string };
 
 export async function runPrompt(
-  session: AgentSession,
+  agent: CursorAgent,
   message: string,
   onStream?: (event: StreamEvent) => void,
 ): Promise<{ output: string; toolTrace: ToolTraceEntry[] }> {
   const trace: ToolTraceEntry[] = [];
   let assistantText = "";
   const pending = new Map<string, string>();
-  let settled = false;
-  let release!: () => void;
-  const done = new Promise<void>((res) => {
-    release = res;
-  });
 
-  const unsubscribe = session.subscribe((event: any) => {
-    if (event.type === "message_update") {
-      const m = event.assistantMessageEvent;
-      if (m?.type === "text_delta" && typeof m.delta === "string") {
-        assistantText += m.delta;
-        onStream?.({ type: "text_delta", delta: m.delta });
+  const run = await agent.send(message);
+  for await (const event of run.stream()) {
+    const t = event?.type;
+    if (t === "assistant") {
+      const blocks = event.message?.content ?? [];
+      for (const block of blocks) {
+        if (block?.type === "text" && typeof block.text === "string") {
+          assistantText += block.text;
+          onStream?.({ type: "text_delta", delta: block.text });
+        }
       }
-    } else if (event.type === "tool_execution_start") {
-      const id = event.toolCallId ?? `${event.toolName}:${trace.length}`;
-      pending.set(id, event.toolName);
-      trace.push({
-        kind: "call",
-        tool: event.toolName,
-        args: event.args ?? {},
-      });
-      onStream?.({
-        type: "tool_call",
-        tool: event.toolName,
-        args: event.args ?? {},
-      });
-    } else if (event.type === "tool_execution_end") {
-      const id = event.toolCallId ?? "";
-      const name = pending.get(id) ?? event.toolName ?? "tool";
+    } else if (t === "tool_call") {
+      const id = event.id ?? event.toolCallId ?? `${event.tool ?? event.name}:${trace.length}`;
+      const name = event.tool ?? event.name ?? "tool";
+      const args = event.args ?? event.params ?? event.input ?? {};
+      pending.set(id, name);
+      trace.push({ kind: "call", tool: name, args });
+      onStream?.({ type: "tool_call", tool: name, args });
+    } else if (t === "tool_result") {
+      const id = event.id ?? event.toolCallId ?? "";
+      const name = pending.get(id) ?? event.tool ?? event.name ?? "tool";
       pending.delete(id);
       const raw = event.result ?? event.output ?? event.error ?? "";
       const s = typeof raw === "string" ? raw : JSON.stringify(raw);
       const preview = s.length > 240 ? s.slice(0, 240) + "…" : s;
-      trace.push({
-        kind: "result",
-        tool: name,
-        isError: !!event.isError,
-        preview,
-      });
-      onStream?.({
-        type: "tool_result",
-        tool: name,
-        isError: !!event.isError,
-        preview,
-      });
-    } else if (event.type === "tool_execution_update") {
-      const raw = event.update;
-      const text =
-        raw == null ? "" :
-        typeof raw === "string" ? raw :
-        JSON.stringify(raw);
+      const isError = !!(event.isError ?? event.error);
+      trace.push({ kind: "result", tool: name, isError, preview });
+      onStream?.({ type: "tool_result", tool: name, isError, preview });
+    } else if (t === "status" || t === "task") {
+      const text = event.text ?? event.message ?? "";
       if (text) onStream?.({ type: "progress", text });
-    } else if (event.type === "agent_end" && !settled) {
-      settled = true;
-      release();
-    }
-  });
-
-  try {
-    await session.prompt(message);
-    await done;
-  } finally {
-    unsubscribe();
-  }
-
-  if (!assistantText.trim()) {
-    const msgs: any[] =
-      (session as any).messages ??
-      (session as any).agent?.state?.messages ??
-      [];
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const m = msgs[i];
-      if (m?.role === "assistant") {
-        const c = m.content;
-        if (typeof c === "string") {
-          assistantText = c;
-        } else if (Array.isArray(c)) {
-          assistantText = c
-            .filter((p: any) => p?.type === "text")
-            .map((p: any) => p.text)
-            .join("");
-        }
-        break;
-      }
     }
   }
+  await run.wait?.();
 
   return { output: assistantText, toolTrace: trace };
 }
@@ -655,56 +535,14 @@ function extractLastJson(text: string): unknown | null {
   return null;
 }
 
-// --- review_pr tool (exposed to chat agent) -----------------------------------
-
-const reviewPrTool = defineTool({
-  name: "review_pr",
-  label: "Review PR",
-  description:
-    "Run the full triage + pattern review pipeline on a GitHub PR URL. Returns a merge confidence card and drilldown with CI analysis, pattern conformance findings, and prior reviewer signals.",
-  parameters: {
-    type: "object" as const,
-    required: ["pr_url"],
-    properties: {
-      pr_url: {
-        type: "string",
-        description:
-          "GitHub pull request URL, e.g. https://github.com/BerriAI/litellm/pull/26957",
-      },
-    },
-  },
-  execute: async (
-    _toolCallId: string,
-    params: { pr_url: string },
-    _signal: any,
-    onUpdate: any,
-  ) => {
-    const progress = (msg: string) =>
-      onUpdate?.({ type: "progress", text: msg });
-    const { card, drilldown } = await reviewPr(params.pr_url, {
-      onProgress: progress,
-    });
-    const text = drilldown ? `${card}\n\n${drilldown}` : card;
-    return { content: [{ type: "text" as const, text }] };
-  },
-});
-
 // --- Agent session factories --------------------------------------------------
 
-async function newSession(
-  systemPrompt: string,
-  extraTools: ToolDefinition[] = [],
-): Promise<AgentSession> {
-  const model = defaultModel();
-  const { session } = await createAgentSession({
-    sessionManager: SessionManager.inMemory(),
-    authStorage,
-    modelRegistry,
-    ...(model ? { model } : {}),
-    customTools: extraTools,
-    systemPrompt,
-  } as any);
-  return session;
+// In Cursor SDK, system prompts are not a first-class field on Agent.create.
+// Callers prepend `systemPrompt` to the user message via `wrapWithSkill` below
+// and pass the resulting string to `runPrompt(agent, prompt)`.
+
+function wrapWithSkill(systemPrompt: string, userMessage: string): string {
+  return `${systemPrompt}\n\n---\n\n${userMessage}`;
 }
 
 // --- Karpathy check via Pi SDK ------------------------------------------------
@@ -713,13 +551,14 @@ export async function runKarpathyCheck(
   prUrl: string,
 ): Promise<KarpathyReview | null> {
   try {
-    const session = await newSession(KARPATHY_SYSTEM);
-    const { output } = await runPrompt(session, `Review this PR: ${prUrl}`);
-    session.dispose?.();
+    const agent = await newCloudAgent("karpathy");
+    const prompt = wrapWithSkill(
+      KARPATHY_SYSTEM,
+      `Review this PR: ${prUrl}\n\nReturn the JSON verdict on the LAST LINE as a single-line object.`,
+    );
+    const { output } = await runPrompt(agent, prompt);
     const raw = extractLastJson(output);
-    if (!raw) {
-      return null;
-    }
+    if (!raw) return null;
     return KarpathyReviewSchema.parse(raw);
   } catch {
     return null;
@@ -1165,25 +1004,53 @@ const _MAX_SIB    = 400;
 const _MAX_PROMPT = 12_000;
 
 function _runGatherLocal(prUrl: string, log: (m: string) => void): Promise<Record<string, unknown>> {
+  return _runScriptJson(PATTERN_GATHER_SCRIPT, prUrl, "pattern", log);
+}
+
+function _runScriptJson(
+  scriptPath: string,
+  prUrl: string,
+  tag: string,
+  log: (m: string) => void,
+): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    log("pattern: running local gather");
-    const child = spawn("python3", [PATTERN_GATHER_SCRIPT, prUrl], { env: { ...process.env } });
+    log(`${tag}: running local gather`);
+    const child = spawn("python3", [scriptPath, prUrl], { env: { ...process.env } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
     child.stderr.on("data", (d: Buffer) => {
       const line = d.toString();
       stderr += line;
-      line.split("\n").filter(Boolean).forEach((l) => log(`gather: ${l.trim()}`));
+      line.split("\n").filter(Boolean).forEach((l) => log(`${tag} gather: ${l.trim()}`));
     });
     child.on("close", (code: number) => {
-      if (code !== 0) reject(new Error(`gather exited ${code}: ${stderr.slice(0, 400)}`));
+      if (code !== 0) reject(new Error(`${tag} gather exited ${code}: ${stderr.slice(0, 400)}`));
       else {
         try { resolve(JSON.parse(stdout.trim())); }
-        catch { reject(new Error(`gather output not JSON: ${stdout.slice(0, 200)}`)); }
+        catch { reject(new Error(`${tag} gather output not JSON: ${stdout.slice(0, 200)}`)); }
       }
     });
   });
+}
+
+async function _triageSingleShot(
+  prUrl: string,
+  log: (m: string) => void,
+): Promise<string> {
+  const gatherData = await _runScriptJson(GATHER_SCRIPT, prUrl, "triage", log);
+  const userPrompt =
+    `PR: ${prUrl}\n\n## Gathered triage data (pre-fetched, use as ground truth)\n\n` +
+    "```json\n" +
+    JSON.stringify(gatherData, null, 2) +
+    "\n```\n\n" +
+    "All context is loaded above. Do NOT call any tool or run bash. " +
+    "Print the TriageReport JSON on the LAST LINE of your response as a single-line object.";
+  log(`triage: single-shot Cursor agent call, prompt=${userPrompt.length} chars`);
+  const agent = await newCloudAgent("triage");
+  const prompt = wrapWithSkill(TRIAGE_SYSTEM, userPrompt);
+  const { output } = await runPrompt(agent, prompt);
+  return output;
 }
 
 function _buildPatternPrompt(prUrl: string, g: Record<string, unknown>): string {
@@ -1223,30 +1090,12 @@ function _buildPatternPrompt(prUrl: string, g: Record<string, unknown>): string 
 async function _patternSingleShot(prUrl: string, log: (m: string) => void): Promise<string> {
   const gatherData = await _runGatherLocal(prUrl, log);
   const userPrompt = _buildPatternPrompt(prUrl, gatherData);
-  log(`pattern: single-shot LLM call, prompt=${userPrompt.length} chars`);
+  log(`pattern: single-shot Cursor agent call, prompt=${userPrompt.length} chars`);
 
-  const base  = _litellmBase  ?? process.env.LITELLM_API_BASE?.replace(/\/+$/, "");
-  const key   = _litellmKey   ?? process.env.LITELLM_API_KEY;
-  const model = defaultModelId ?? process.env.LITELLM_DEFAULT_MODEL ?? "anthropic/claude-sonnet-4-6";
-
-  const resp = await fetch(`${base}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({
-      model,
-      max_tokens: 4096,
-      messages: [
-        { role: "system", content: PATTERN_SYSTEM_SINGLE_SHOT },
-        { role: "user",   content: userPrompt },
-      ],
-    }),
-  });
-  if (!resp.ok) {
-    const txt = await resp.text();
-    throw new Error(`LLM call failed HTTP ${resp.status}: ${txt.slice(0, 300)}`);
-  }
-  const json = (await resp.json()) as { choices: Array<{ message: { content: string } }> };
-  return json.choices[0]?.message?.content ?? "";
+  const agent = await newCloudAgent("pattern");
+  const prompt = wrapWithSkill(PATTERN_SYSTEM_SINGLE_SHOT, userPrompt);
+  const { output } = await runPrompt(agent, prompt);
+  return output;
 }
 
 // --- Core review orchestration ------------------------------------------------
@@ -1286,16 +1135,9 @@ export async function reviewPr(
   await Promise.all([
     (async () => {
       try {
-        log("triage: creating session");
-        const session = await newSession(TRIAGE_SYSTEM);
-        log("triage: running gather + analysis");
-        let { output: triageOut, toolTrace: tt } = await runPrompt(
-          session,
-          `Triage this PR: ${prUrl}`,
-        );
-        triageTrace = tt;
+        const triageOut = await _triageSingleShot(prUrl, log);
+        triageTrace = [];
         const raw = extractLastJson(triageOut);
-        session.dispose?.();
         if (raw) {
           triage = TriageReportSchema.parse(raw);
           log("triage: done ✓");
@@ -1421,7 +1263,7 @@ type Thread = {
   id: string;
   title: string;
   updated_at: number;
-  agent: AgentSession | null;
+  agent: CursorAgent | null;
   turns: Turn[];
   // Serialise prompts: each call chains onto this promise so concurrent
   // requests queue rather than crashing with "Agent is already processing".
@@ -1429,6 +1271,9 @@ type Thread = {
 };
 
 const THREADS = new Map<string, Thread>();
+
+const PR_URL_RE =
+  /https:\/\/github\.com\/[A-Za-z0-9_.\-/]+\/pull\/\d+/g;
 
 export async function ensureChatSession(
   threadId: string,
@@ -1448,21 +1293,17 @@ export async function ensureChatSession(
   } else if (title && thread.title === "New chat") {
     thread.title = title;
   }
-  // Lazily create agent session on first use (or if null from createThread)
   if (!thread.agent) {
-    thread.agent = await newSession(CHAT_SYSTEM, [reviewPrTool]);
+    thread.agent = await newCloudAgent(`chat-${threadId.slice(0, 8)}`);
   }
   return thread;
 }
 
-function getAvailableTools(thread: Thread): string[] {
-  const agentAny = thread.agent as any;
-  return (
-    agentAny?.tools?.map((t: any) => t.name) ??
-    agentAny?.runtime?.tools?.map((t: any) => t.name) ??
-    agentAny?.state?.tools?.map((t: any) => t.name) ??
-    []
-  );
+function getAvailableTools(_thread: Thread): string[] {
+  // Cursor cloud agents expose a fixed harness (Bash, Read, Grep, Glob, Edit,
+  // ...). Surface the ones the chat path benefits from + the synthesized
+  // "review_pr" URL-detect path so the UI tool list is accurate.
+  return ["review_pr", "bash", "read", "grep"];
 }
 
 async function runQueued<T>(thread: Thread, fn: () => Promise<T>): Promise<T> {
@@ -1474,6 +1315,48 @@ async function runQueued<T>(thread: Thread, fn: () => Promise<T>): Promise<T> {
   });
   thread.queue = thread.queue.then(() => fn().then(resolve, reject));
   return result;
+}
+
+async function runChatTurn(
+  thread: Thread,
+  message: string,
+  onStream?: (event: StreamEvent) => void,
+): Promise<{ output: string; toolTrace: ToolTraceEntry[] }> {
+  const matches = message.match(PR_URL_RE) ?? [];
+  const urls = Array.from(new Set(matches));
+
+  const reviewBlocks: string[] = [];
+  const trace: ToolTraceEntry[] = [];
+  for (const url of urls) {
+    onStream?.({ type: "tool_call", tool: "review_pr", args: { pr_url: url } });
+    trace.push({ kind: "call", tool: "review_pr", args: { pr_url: url } });
+    try {
+      const { card, drilldown } = await reviewPr(url, {
+        source: "chat",
+        onProgress: (msg) => onStream?.({ type: "progress", text: msg }),
+      });
+      const text = drilldown ? `${card}\n\n${drilldown}` : card;
+      reviewBlocks.push(`## Review for ${url}\n\n${text}`);
+      const preview = text.length > 240 ? text.slice(0, 240) + "…" : text;
+      onStream?.({ type: "tool_result", tool: "review_pr", isError: false, preview });
+      trace.push({ kind: "result", tool: "review_pr", isError: false, preview });
+    } catch (e) {
+      const err = String(e).slice(0, 240);
+      reviewBlocks.push(`## Review for ${url}\n\nERROR: ${err}`);
+      onStream?.({ type: "tool_result", tool: "review_pr", isError: true, preview: err });
+      trace.push({ kind: "result", tool: "review_pr", isError: true, preview: err });
+    }
+  }
+
+  const fullMessage = reviewBlocks.length
+    ? wrapWithSkill(
+        CHAT_SYSTEM,
+        `${reviewBlocks.join("\n\n")}\n\n---\nUser message:\n${message}`,
+      )
+    : wrapWithSkill(CHAT_SYSTEM, message);
+
+  const { output, toolTrace } = await runPrompt(thread.agent!, fullMessage, onStream);
+  return { output, toolTrace: [...trace, ...toolTrace] };
 }
 
 export async function promptChatSession(
@@ -1489,7 +1372,7 @@ export async function promptChatSession(
   const thread = await ensureChatSession(threadId, title);
   const availableTools = getAvailableTools(thread);
   return runQueued(thread, async () => {
-    const { output, toolTrace } = await runPrompt(thread.agent!, message);
+    const { output, toolTrace } = await runChatTurn(thread, message);
     thread.turns.push({ role: "user", content: message });
     thread.turns.push({
       role: "assistant",
@@ -1515,11 +1398,7 @@ export async function promptChatSessionStreaming(
   const thread = await ensureChatSession(threadId, title);
   const availableTools = getAvailableTools(thread);
   return runQueued(thread, async () => {
-    const { output, toolTrace } = await runPrompt(
-      thread.agent!,
-      message,
-      onStream,
-    );
+    const { output, toolTrace } = await runChatTurn(thread, message, onStream);
     thread.turns.push({ role: "user", content: message });
     thread.turns.push({
       role: "assistant",
@@ -1548,7 +1427,7 @@ export function getThread(threadId: string): Thread | undefined {
 export function deleteThread(threadId: string): boolean {
   const t = THREADS.get(threadId);
   if (!t) return false;
-  t.agent.dispose?.();
+  t.agent?.stop?.();
   return THREADS.delete(threadId);
 }
 

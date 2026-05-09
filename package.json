@@ -1,7 +1,7 @@
 {
   "name": "pi-pr-review-agent",
   "version": "0.1.0",
-  "description": "PR review agent server using @mariozechner/pi-coding-agent",
+  "description": "PR review agent server using @cursor/sdk (cloud-mode agents against BerriAI/litellm)",
   "type": "module",
   "private": true,
   "scripts": {
@@ -9,7 +9,7 @@
     "start": "tsx --env-file .env app/server.ts"
   },
   "dependencies": {
-    "@mariozechner/pi-coding-agent": "^0.71.1",
+    "@cursor/sdk": "^1.0.12",
     "express": "^4.21.2",
     "express-session": "^1.18.1",
     "pg": "^8.13.3",

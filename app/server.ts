@@ -5,7 +5,6 @@ import express, { type NextFunction, type Request, type Response } from "express
 import session from "express-session";
 import * as db from "./db.js";
 import {
-  initRegistry,
   initSystemPrompts,
   reviewPr,
   promptChatSession,
@@ -374,12 +373,8 @@ app.get("/api/v1/eval-sets/:name/download", requireLogin, async (req, res) => {
 // --- Models endpoint ----------------------------------------------------------
 
 app.get("/api/models", requireLogin, (_req, res) => {
-  try {
-    const all = (global as any).__modelRegistry?.getAll?.()?.map((m: any) => ({
-      provider: m.provider, id: m.id, name: m.name ?? m.id,
-    })) ?? [];
-    res.json({ models: all });
-  } catch { res.json({ models: [] }); }
+  const id = process.env.CURSOR_MODEL ?? "claude-sonnet-4-6";
+  res.json({ models: [{ provider: "cursor", id, name: id }] });
 });
 
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
@@ -389,7 +384,6 @@ app.get("/healthz", (_req, res) => res.json({ ok: true }));
 const PORT = Number(process.env.PORT) || 8081;
 
 await db.initDb();
-await initRegistry();
 initSystemPrompts();
 
 app.listen(PORT);

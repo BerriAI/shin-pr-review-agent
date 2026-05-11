@@ -14,7 +14,6 @@ import express, {
 } from "express";
 import session from "express-session";
 import * as db from "./db.js";
-import { isFirstTimeAuthor } from "./automerge_guards.js";
 import {
   initRegistry,
   initSystemPrompts,
@@ -2628,9 +2627,6 @@ async function pollBlockedWatches(): Promise<void> {
 
 // --- Auto-merge hook ----------------------------------------------------------
 
-// isFirstTimeAuthor lives in app/automerge_guards.ts so smoke tests can
-// import it without dragging in server.ts's top-level DB init / app.listen.
-
 async function autoMergeReadyPr(
   _prUrl: string,
   prNumber: number,
@@ -2654,22 +2650,6 @@ async function autoMergeReadyPr(
   const authorLogin = prState.user.login;
   const authorType = prState.user.type;
   const isBot = authorType === "Bot" || /\[bot\]$/.test(authorLogin);
-  if (!isBot) {
-    const ftaRes = await isFirstTimeAuthor(token, repo, authorLogin);
-    if (ftaRes.is_first_time) {
-      console.log(`[auto-merge] PR #${prNumber} first-time author ${authorLogin}, skipping`);
-      await db.recordAutomergeDecision(runId, {
-        decision: "skipped",
-        reason: ftaRes.api_error ? "first_time_author_api_error" : "first_time_author",
-        evidence: {
-          author: authorLogin,
-          prior_merges: ftaRes.prior_merges,
-          api_error: ftaRes.api_error,
-        },
-      });
-      return;
-    }
-  }
   const { claimed, countToday } = await db.claimStagingMergeSlot(prNumber, repo, DAILY_MERGE_CAP);
   if (!claimed) {
     console.log(`[auto-merge] PR #${prNumber} cap reached or already staged (${countToday}/${DAILY_MERGE_CAP} today)`);

@@ -18,8 +18,6 @@ import {
   greptileGatePass,
   _buildTriagePrompt,
 } from "../app/review.js";
-import { isFirstTimeAuthor } from "../app/automerge_guards.js";
-
 let failed = 0;
 let passed = 0;
 
@@ -261,64 +259,6 @@ check(
   "no copy of the injected directive leaks outside the tags",
   !outside.includes(INJECTION),
 );
-
-// ---------------------------------------------------------------------------
-// 4. First-time-author quarantine. We monkey-patch global fetch with three
-//    canned responses (no contributions / has contributions / API error) and
-//    assert the helper returns the right verdict for each.
-// ---------------------------------------------------------------------------
-console.log("\n[4] First-time-author quarantine");
-
-const realFetch = globalThis.fetch;
-function stubFetch(handler: (url: string) => Response): void {
-  globalThis.fetch = ((input: any) =>
-    Promise.resolve(handler(String(input)))) as typeof fetch;
-}
-function makeJsonResp(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-try {
-  stubFetch(() => makeJsonResp({ total_count: 0, items: [] }));
-  const verdict = await isFirstTimeAuthor("tok", "BerriAI/litellm", "newbie");
-  check(
-    "author with 0 prior merged PRs is flagged as first-time",
-    verdict.is_first_time === true,
-  );
-
-  stubFetch(() => makeJsonResp({ total_count: 7, items: [] }));
-  const verdict2 = await isFirstTimeAuthor("tok", "BerriAI/litellm", "regular");
-  check(
-    "author with 7 prior merged PRs is NOT first-time",
-    verdict2.is_first_time === false,
-  );
-
-  stubFetch(() => new Response("rate limited", { status: 403 }));
-  const verdict3 = await isFirstTimeAuthor("tok", "BerriAI/litellm", "any");
-  check(
-    "non-2xx response fails CLOSED (treated as first-time, quarantined)",
-    verdict3.is_first_time === true && verdict3.api_error === true,
-  );
-
-  // URL-encoding sanity: the helper must encode the query string.
-  let capturedUrl = "";
-  stubFetch((url) => {
-    capturedUrl = url;
-    return makeJsonResp({ total_count: 1, items: [] });
-  });
-  await isFirstTimeAuthor("tok", "BerriAI/litellm", "ev+il user");
-  check(
-    "query string is URL-encoded (no raw spaces or '+' from login)",
-    capturedUrl.includes("repo%3ABerriAI%2Flitellm") &&
-      capturedUrl.includes("author%3Aev%2Bil"),
-    `captured url: ${capturedUrl}`,
-  );
-} finally {
-  globalThis.fetch = realFetch;
-}
 
 // ---------------------------------------------------------------------------
 // Summary

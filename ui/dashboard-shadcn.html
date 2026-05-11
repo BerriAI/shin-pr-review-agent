@@ -1,0 +1,658 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <title>Dashboard — shin-pr-review-agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+  <style>
+    /* ── shadcn/ui design tokens ── */
+    :root {
+      --background: hsl(0 0% 100%);
+      --foreground: hsl(240 10% 3.9%);
+      --card: hsl(0 0% 100%);
+      --card-foreground: hsl(240 10% 3.9%);
+      --border: hsl(240 5.9% 90%);
+      --input: hsl(240 5.9% 90%);
+      --primary: hsl(240 5.9% 10%);
+      --primary-foreground: hsl(0 0% 98%);
+      --secondary: hsl(240 4.8% 95.9%);
+      --secondary-foreground: hsl(240 5.9% 10%);
+      --muted: hsl(240 4.8% 95.9%);
+      --muted-foreground: hsl(240 3.8% 46.1%);
+      --accent: hsl(240 4.8% 95.9%);
+      --destructive: hsl(0 72% 51%);
+      --destructive-foreground: hsl(0 0% 98%);
+      --ring: hsl(240 5.9% 10%);
+      --radius: 0.5rem;
+      /* semantic merge colours */
+      --staging-bg: hsl(263 85% 96%);
+      --staging-fg: hsl(263 70% 40%);
+      --staging-border: hsl(263 60% 88%);
+      --staging-bar: hsl(263 60% 55%);
+      --internal-bg: hsl(152 60% 94%);
+      --internal-fg: hsl(152 65% 28%);
+      --internal-border: hsl(152 45% 84%);
+      --internal-bar: hsl(152 55% 40%);
+      --reverted-bg: hsl(0 72% 96%);
+      --reverted-fg: hsl(0 72% 40%);
+    }
+
+    /* ── reset ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0 }
+    html { color-scheme: light; font-size: 16px }
+    body {
+      font-family: 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 0.875rem;
+      line-height: 1.5;
+      background: var(--background);
+      color: var(--foreground);
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+    }
+    a { color: inherit; text-decoration: none }
+    button { font-family: inherit; cursor: pointer }
+
+    /* ── focus ring (shadcn pattern) ── */
+    :focus-visible {
+      outline: 2px solid var(--ring);
+      outline-offset: 2px;
+      border-radius: calc(var(--radius) - 2px);
+    }
+
+    /* ── skip link ── */
+    .skip-link {
+      position: absolute; top: -40px; left: 8px; z-index: 100;
+      padding: 8px 16px; background: var(--primary); color: var(--primary-foreground);
+      border-radius: var(--radius); font-size: 0.8125rem; font-weight: 500;
+      transition: top 0.15s;
+    }
+    .skip-link:focus { top: 8px }
+
+    /* ── topbar ── */
+    #topbar {
+      position: sticky; top: 0; z-index: 50;
+      height: 57px;
+      border-bottom: 1px solid var(--border);
+      background: hsla(0 0% 100% / 0.85);
+      backdrop-filter: blur(12px);
+      display: flex; align-items: center; gap: 0; padding: 0 24px;
+    }
+    .topbar-brand {
+      display: flex; align-items: center; gap: 8px;
+      padding-right: 20px; border-right: 1px solid var(--border);
+    }
+    .topbar-brand svg { display: block }
+    .topbar-brand-name {
+      font-size: 0.8125rem; font-weight: 600; color: var(--foreground);
+      letter-spacing: -0.01em;
+    }
+    .topbar-nav { display: flex; align-items: center; gap: 1px; padding: 0 16px }
+    .topbar-nav-item {
+      display: inline-flex; align-items: center;
+      padding: 5px 12px; border-radius: var(--radius);
+      font-size: 0.8125rem; font-weight: 500; color: var(--muted-foreground);
+      border: 1px solid transparent;
+      transition: background 0.12s, color 0.12s, border-color 0.12s;
+    }
+    .topbar-nav-item:hover { background: var(--secondary); color: var(--foreground) }
+    .topbar-nav-item.active {
+      background: var(--secondary); color: var(--foreground);
+      border-color: var(--border);
+    }
+    .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px }
+    .live-badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 8px; border-radius: 9999px;
+      background: var(--secondary); border: 1px solid var(--border);
+      font-size: 0.6875rem; font-weight: 500; color: var(--muted-foreground);
+      letter-spacing: 0.02em; text-transform: uppercase;
+    }
+    .live-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: hsl(152 55% 40%);
+      animation: pulse 2.4s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1) }
+      50% { opacity: 0.45; transform: scale(0.75) }
+    }
+    @media (prefers-reduced-motion: reduce) { .live-dot { animation: none } }
+    .topbar-ts {
+      font-family: 'Geist Mono', monospace;
+      font-size: 0.6875rem; color: var(--muted-foreground);
+      padding: 4px 10px; border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    /* ── page layout ── */
+    #main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px }
+
+    /* ── page header ── */
+    .page-header { margin-bottom: 28px; opacity: 0; transform: translateY(6px); animation: fadeUp 0.3s ease forwards }
+    @keyframes fadeUp {
+      to { opacity: 1; transform: translateY(0) }
+    }
+    @media (prefers-reduced-motion: reduce) { .page-header, .stat-card, .section { animation: none; opacity: 1; transform: none } }
+    .page-title { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.025em; text-wrap: balance; color: var(--foreground) }
+    .page-subtitle { font-size: 0.8125rem; color: var(--muted-foreground); margin-top: 3px }
+
+    /* ── section label ── */
+    .section-header {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 12px;
+    }
+    .section-header h2 {
+      font-size: 0.6875rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.07em;
+      color: var(--muted-foreground);
+      text-wrap: balance;
+    }
+    .section-divider { flex: 1; height: 1px; background: var(--border) }
+
+    /* ── stat cards ── */
+    .stat-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+      margin-bottom: 28px;
+    }
+    @media (max-width: 768px) { .stat-grid { grid-template-columns: repeat(2, 1fr) } }
+    .stat-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px 18px;
+      opacity: 0; transform: translateY(8px);
+      animation: fadeUp 0.35s ease forwards;
+      transition: box-shadow 0.15s, border-color 0.15s;
+    }
+    .stat-card:hover { box-shadow: 0 1px 6px hsla(240 10% 3.9% / 0.06) }
+    .stat-card:nth-child(1) { animation-delay: 0.05s }
+    .stat-card:nth-child(2) { animation-delay: 0.1s }
+    .stat-card:nth-child(3) { animation-delay: 0.15s }
+    .stat-card:nth-child(4) { animation-delay: 0.2s }
+    .stat-label {
+      font-size: 0.6875rem; font-weight: 500; color: var(--muted-foreground);
+      text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .stat-label svg { flex-shrink: 0 }
+    .stat-value {
+      font-family: 'Geist Mono', monospace;
+      font-size: 2rem; font-weight: 700; line-height: 1;
+      letter-spacing: -0.04em;
+      font-variant-numeric: tabular-nums;
+      color: var(--foreground);
+    }
+    .stat-desc { font-size: 0.75rem; color: var(--muted-foreground); margin-top: 6px }
+    .stat-card.card-staging { border-color: var(--staging-border) }
+    .stat-card.card-staging .stat-value { color: var(--staging-fg) }
+    .stat-card.card-internal { border-color: var(--internal-border) }
+    .stat-card.card-internal .stat-value { color: var(--internal-fg) }
+    .stat-card.card-destructive { border-color: hsl(0 60% 88%) }
+    .stat-card.card-destructive .stat-value { color: var(--destructive) }
+
+    /* ── cap progress ── */
+    .cap-bar-wrap { margin-top: 10px }
+    .cap-bar-bg {
+      height: 4px; background: var(--secondary); border-radius: 9999px; overflow: hidden;
+    }
+    .cap-bar-fill {
+      height: 100%; background: var(--foreground); border-radius: 9999px;
+      transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .cap-bar-fill.warn { background: hsl(38 92% 50%) }
+    .cap-bar-fill.full { background: var(--destructive) }
+
+    /* ── two-col ── */
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 28px }
+    @media (max-width: 860px) { .two-col { grid-template-columns: 1fr } }
+
+    /* ── card ── */
+    .section {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: hidden;
+      opacity: 0; transform: translateY(8px);
+      animation: fadeUp 0.35s ease forwards;
+    }
+    .section:nth-child(1) { animation-delay: 0.25s }
+    .section:nth-child(2) { animation-delay: 0.3s }
+    .section-body { padding: 18px 20px }
+    .card-title {
+      font-size: 0.8125rem; font-weight: 600; color: var(--foreground);
+      margin-bottom: 16px; display: flex; align-items: center; gap: 8px;
+    }
+    .badge {
+      display: inline-flex; align-items: center;
+      padding: 2px 7px; border-radius: 9999px;
+      font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.02em;
+      border: 1px solid transparent;
+    }
+    .badge-staging { background: var(--staging-bg); color: var(--staging-fg); border-color: var(--staging-border) }
+    .badge-internal { background: var(--internal-bg); color: var(--internal-fg); border-color: var(--internal-border) }
+    .badge-neutral { background: var(--secondary); color: var(--foreground); border-color: var(--border) }
+
+    /* ── bar chart ── */
+    .bar-chart-wrap { display: flex; align-items: flex-end; gap: 5px; height: 80px; margin-bottom: 6px }
+    .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px }
+    .bar-col-inner { flex: 1; width: 100%; display: flex; flex-direction: column; justify-content: flex-end }
+    .bar-today-wrap { position: relative }
+    .bar-today-wrap::after {
+      content: 'today';
+      position: absolute; bottom: -16px; left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.5625rem; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.04em; color: var(--muted-foreground); white-space: nowrap;
+    }
+    .bar {
+      width: 100%; min-height: 2px;
+      transition: opacity 0.12s;
+    }
+    .bar:hover { opacity: 0.7; cursor: default }
+    .bar-s { background: var(--staging-bar); border-radius: 3px 3px 0 0 }
+    .bar-i { background: var(--internal-bar) }
+    .bar-s.only { border-radius: 3px 3px 0 0 }
+    .bar-i.has-s { border-radius: 0 }
+    .bar-i.only { border-radius: 3px 3px 0 0 }
+    .bar-zero { width: 100%; height: 3px; background: var(--border); border-radius: 2px; align-self: flex-end }
+    .bar-label { font-family: 'Geist Mono', monospace; font-size: 0.5625rem; color: var(--muted-foreground); font-variant-numeric: tabular-nums }
+    .bar-day { font-size: 0.5625rem; color: var(--muted-foreground); letter-spacing: 0.02em }
+    .chart-legend { display: flex; gap: 14px; margin-top: 18px }
+    .legend-item { display: flex; align-items: center; gap: 5px; font-size: 0.75rem; color: var(--muted-foreground) }
+    .legend-swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0 }
+    .swatch-s { background: var(--staging-bar) }
+    .swatch-i { background: var(--internal-bar) }
+
+    /* ── 7d totals ── */
+    .totals-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px }
+    .total-item .total-label {
+      font-size: 0.6875rem; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.05em; color: var(--muted-foreground); margin-bottom: 4px;
+    }
+    .total-item .total-val {
+      font-family: 'Geist Mono', monospace;
+      font-size: 2.25rem; font-weight: 700; letter-spacing: -0.04em; line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    .total-item .total-sub { font-size: 0.75rem; color: var(--muted-foreground); margin-top: 4px }
+    .total-item.t-staging .total-val { color: var(--staging-fg) }
+    .total-item.t-internal .total-val { color: var(--internal-fg) }
+
+    /* ── ratio bar ── */
+    .ratio-wrap { border-top: 1px solid var(--border); padding-top: 14px }
+    .ratio-labels {
+      display: flex; justify-content: space-between;
+      font-size: 0.75rem; color: var(--muted-foreground); margin-bottom: 6px;
+    }
+    .ratio-bg {
+      height: 6px; background: var(--secondary); border-radius: 9999px; overflow: hidden;
+    }
+    .ratio-fill {
+      height: 100%; border-radius: 9999px;
+      background: linear-gradient(90deg, var(--staging-bar), var(--internal-bar));
+      transition: width 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    /* ── table ── */
+    .table-section {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: hidden;
+      opacity: 0; transform: translateY(8px);
+      animation: fadeUp 0.35s ease 0.35s forwards;
+    }
+    .table-header {
+      padding: 12px 16px 11px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .table-title { font-size: 0.8125rem; font-weight: 600; color: var(--foreground) }
+    .table-count {
+      font-family: 'Geist Mono', monospace; font-size: 0.6875rem;
+      color: var(--muted-foreground);
+      font-variant-numeric: tabular-nums;
+    }
+    .pr-table { width: 100%; border-collapse: collapse }
+    .pr-table thead th {
+      padding: 9px 14px;
+      text-align: left;
+      font-size: 0.6875rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--muted-foreground);
+      border-bottom: 1px solid var(--border);
+      background: var(--secondary);
+    }
+    .pr-table thead th:first-child { padding-left: 16px }
+    .pr-table thead th:last-child { padding-right: 16px }
+    .pr-table tbody td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: middle }
+    .pr-table tbody td:first-child { padding-left: 16px }
+    .pr-table tbody td:last-child { padding-right: 16px; text-align: right }
+    .pr-table tbody tr:last-child td { border-bottom: 0 }
+    .pr-table tbody tr:hover td { background: var(--secondary) }
+    .pr-num-link {
+      font-family: 'Geist Mono', monospace; font-size: 0.75rem; font-weight: 500;
+      color: var(--muted-foreground);
+      padding: 2px 6px; border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
+      transition: background 0.1s, border-color 0.1s, color 0.1s;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .pr-num-link:hover { background: var(--secondary); border-color: var(--foreground); color: var(--foreground) }
+    .pr-title-text {
+      font-size: 0.8125rem; color: var(--foreground);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      max-width: 340px; display: block;
+      min-width: 0;
+    }
+    .pr-author { font-size: 0.75rem; color: var(--muted-foreground) }
+    .pr-time {
+      font-family: 'Geist Mono', monospace; font-size: 0.6875rem;
+      color: var(--muted-foreground); white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .tag {
+      display: inline-flex; align-items: center;
+      padding: 2px 7px; border-radius: 9999px;
+      font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.01em;
+      border: 1px solid transparent; white-space: nowrap;
+    }
+    .tag-staging { background: var(--staging-bg); color: var(--staging-fg); border-color: var(--staging-border) }
+    .tag-internal { background: var(--internal-bg); color: var(--internal-fg); border-color: var(--internal-border) }
+    .tag-reverted { background: var(--reverted-bg); color: var(--reverted-fg); border-color: hsl(0 60% 88%) }
+    .empty-state { padding: 40px 16px; text-align: center; color: var(--muted-foreground); font-size: 0.8125rem }
+  </style>
+</head>
+<body>
+
+<a href="#main" class="skip-link">Skip to content</a>
+
+<header id="topbar" role="banner">
+  <div class="topbar-brand">
+    <!-- Vercel-style triangle mark -->
+    <svg width="16" height="14" viewBox="0 0 16 14" fill="none" aria-hidden="true">
+      <path d="M8 0L16 14H0L8 0Z" fill="currentColor"/>
+    </svg>
+    <span class="topbar-brand-name">shin-pr-review-agent</span>
+  </div>
+
+  <nav class="topbar-nav" aria-label="Main navigation">
+    <a href="/dashboard" class="topbar-nav-item active" aria-current="page">Dashboard</a>
+    <a href="/runs" class="topbar-nav-item">Runs</a>
+    <a href="/chat" class="topbar-nav-item">Chat</a>
+  </nav>
+
+  <div class="topbar-right">
+    <span class="live-badge" aria-label="Live data">
+      <span class="live-dot" aria-hidden="true"></span>
+      Live
+    </span>
+    <span class="topbar-ts" id="ts" aria-live="polite" aria-atomic="true">—</span>
+  </div>
+</header>
+
+<main id="main">
+<div id="page">
+
+  <div class="page-header">
+    <h1 class="page-title">Merge&nbsp;Dashboard</h1>
+    <p class="page-subtitle" id="page-subtitle">Loading…</p>
+  </div>
+
+  <!-- TODAY -->
+  <div class="section-header" style="animation-delay:0.02s">
+    <h2>Today</h2>
+    <div class="section-divider" role="presentation"></div>
+  </div>
+
+  <div class="stat-grid" role="region" aria-label="Today's merge statistics">
+    <div class="stat-card card-staging">
+      <div class="stat-label">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1L15 14H1L8 1Z" fill="currentColor" opacity=".4"/><path d="M8 5L12 12H4L8 5Z" fill="currentColor"/></svg>
+        Merged → Staging
+      </div>
+      <div class="stat-value" id="today-staging" aria-live="polite">—</div>
+      <div class="stat-desc">Individual PRs today</div>
+    </div>
+    <div class="stat-card card-internal">
+      <div class="stat-label">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="3" fill="currentColor"/><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+        Staging → Internal
+      </div>
+      <div class="stat-value" id="today-internal" aria-live="polite">—</div>
+      <div class="stat-desc">Staging PRs shipped</div>
+    </div>
+    <div class="stat-card card-destructive">
+      <div class="stat-label">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v5M8 11v1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+        Reverted
+      </div>
+      <div class="stat-value" id="today-reverted" aria-live="polite">—</div>
+      <div class="stat-desc">Staging merges undone</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M5 8h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        Daily Cap
+      </div>
+      <div class="stat-value" id="today-cap" style="font-variant-numeric:tabular-nums">—</div>
+      <div class="cap-bar-wrap" aria-hidden="true">
+        <div class="cap-bar-bg"><div class="cap-bar-fill" id="cap-bar" style="width:0%"></div></div>
+      </div>
+      <div class="stat-desc" id="cap-desc">of 10 daily slots used</div>
+    </div>
+  </div>
+
+  <!-- 7-DAY -->
+  <div class="section-header" style="margin-top:4px">
+    <h2>Last 7&nbsp;Days</h2>
+    <div class="section-divider" role="presentation"></div>
+  </div>
+
+  <div class="two-col">
+    <div class="section" role="region" aria-label="Daily merge chart">
+      <div class="section-body">
+        <div class="card-title">
+          Merges per day
+          <span class="badge badge-staging">→ staging</span>
+          <span class="badge badge-internal">→ internal</span>
+        </div>
+        <div class="bar-chart-wrap" id="bar-chart" aria-label="Bar chart of merges per day, last 7 days" role="img"></div>
+        <div class="chart-legend">
+          <span class="legend-item"><span class="legend-swatch swatch-s" aria-hidden="true"></span>→ Staging branch</span>
+          <span class="legend-item"><span class="legend-swatch swatch-i" aria-hidden="true"></span>Staging → Internal</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section" role="region" aria-label="7-day totals">
+      <div class="section-body">
+        <div class="card-title">7-day totals <span class="badge badge-neutral">7&thinsp;d</span></div>
+        <div class="totals-grid">
+          <div class="total-item t-staging">
+            <div class="total-label">→ Staging</div>
+            <div class="total-val" id="w-staging">—</div>
+            <div class="total-sub">PRs merged this week</div>
+          </div>
+          <div class="total-item t-internal">
+            <div class="total-label">→ Internal</div>
+            <div class="total-val" id="w-internal">—</div>
+            <div class="total-sub">Staging PRs shipped</div>
+          </div>
+        </div>
+        <div class="ratio-wrap">
+          <div class="ratio-labels">
+            <span id="ratio-left">Staging</span>
+            <span id="ratio-right">Internal</span>
+          </div>
+          <div class="ratio-bg" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="ratio-pb">
+            <div class="ratio-fill" id="ratio-fill" style="width:50%"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RECENT MERGES -->
+  <div class="section-header">
+    <h2>Recent Merges</h2>
+    <div class="section-divider" role="presentation"></div>
+  </div>
+
+  <div class="table-section" role="region" aria-label="Recent merges table">
+    <div class="table-header">
+      <span class="table-title">Pull Requests</span>
+      <span class="table-count" id="table-count" aria-live="polite">— entries</span>
+    </div>
+    <table class="pr-table" aria-label="Recent merged pull requests">
+      <thead>
+        <tr>
+          <th scope="col">#</th>
+          <th scope="col">Title</th>
+          <th scope="col">Author</th>
+          <th scope="col">Type</th>
+          <th scope="col">Merged</th>
+        </tr>
+      </thead>
+      <tbody id="recent-tbody">
+        <tr><td colspan="5" class="empty-state">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+</main>
+
+<script>
+// ---------------------------------------------------------------------------
+// Mock data — swap render(MOCK) for:
+//   fetch("/api/v1/dashboard").then(r => r.json()).then(render);
+// ---------------------------------------------------------------------------
+const MOCK = {
+  today: { staging: 4, internal: 1, reverted: 0, cap_used: 4, cap_total: 10 },
+  week: [
+    { date: "05-05", staging: 2, internal: 0 },
+    { date: "05-06", staging: 7, internal: 1 },
+    { date: "05-07", staging: 5, internal: 2 },
+    { date: "05-08", staging: 3, internal: 1 },
+    { date: "05-09", staging: 0, internal: 0 },
+    { date: "05-10", staging: 6, internal: 1 },
+    { date: "05-11", staging: 4, internal: 1 },
+  ],
+  recent: [
+    { pr: 25810, title: "fix(proxy): handle timeout in LLM call correctly", author: "dev-user", type: "staging", ms_ago: 12*60000 },
+    { pr: 25803, title: "feat(router): add retry backoff for rate-limited models", author: "contributor42", type: "staging", ms_ago: 45*60000 },
+    { pr: 25799, title: "feat(guardrails): add prompt injection detection", author: "sec-bot", type: "staging", ms_ago: 90*60000 },
+    { pr: 25791, title: "chore(deps): bump litellm to 1.35.2", author: "depbot", type: "internal", ms_ago: 3*3600000 },
+    { pr: 25788, title: "fix(anthropic): correct token count for claude-3-5", author: "krrish", type: "staging", ms_ago: 5*3600000 },
+    { pr: 25772, title: "feat(responses): wire /v1/responses to Bedrock models", author: "another-dev", type: "staging", ms_ago: 28*3600000 },
+    { pr: 25760, title: "fix(streaming): handle CancelledError on disconnect", author: "upstream", type: "reverted", ms_ago: 30*3600000 },
+  ],
+};
+
+function relTime(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+function setText(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+function render(data) {
+  const now = new Date();
+  const dateStr = now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  setText("page-subtitle", `Stats for ${dateStr} — BerriAI/litellm`);
+  setText("ts", now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }));
+
+  // Today
+  setText("today-staging", data.today.staging);
+  setText("today-internal", data.today.internal);
+  setText("today-reverted", data.today.reverted);
+  setText("today-cap", `${data.today.cap_used} / ${data.today.cap_total}`);
+  setText("cap-desc", `${data.today.cap_used} of ${data.today.cap_total} daily slots used`);
+  const capPct = Math.round((data.today.cap_used / data.today.cap_total) * 100);
+  const capBar = document.getElementById("cap-bar");
+  if (capBar) {
+    capBar.style.width = capPct + "%";
+    capBar.className = "cap-bar-fill" + (capPct >= 100 ? " full" : capPct >= 70 ? " warn" : "");
+  }
+  const pb = document.getElementById("ratio-pb");
+  if (pb) pb.setAttribute("aria-valuenow", capPct);
+
+  // Bar chart
+  const maxVal = Math.max(...data.week.map(d => d.staging + d.internal), 1);
+  const chartEl = document.getElementById("bar-chart");
+  if (chartEl) {
+    chartEl.innerHTML = "";
+    data.week.forEach((d, i) => {
+      const isToday = i === data.week.length - 1;
+      const total = d.staging + d.internal;
+      const H = Math.round((total / maxVal) * 72);
+      const sH = total > 0 ? Math.round((d.staging / total) * H) : 0;
+      const iH = H - sH;
+      const col = document.createElement("div");
+      col.className = "bar-col" + (isToday ? " bar-today-wrap" : "");
+
+      let barsHTML = "";
+      if (total === 0) {
+        barsHTML = `<div class="bar-zero"></div>`;
+      } else {
+        if (sH) barsHTML += `<div class="bar bar-s${iH ? "" : " only"}" style="height:${sH}px;opacity:${isToday ? 1 : .65}" title="→ staging: ${d.staging}"></div>`;
+        if (iH) barsHTML += `<div class="bar bar-i${sH ? " has-s" : " only"}" style="height:${iH}px;opacity:${isToday ? 1 : .65}" title="→ internal: ${d.internal}"></div>`;
+      }
+
+      col.innerHTML = `
+        <div class="bar-label">${total > 0 ? total : ""}</div>
+        <div class="bar-col-inner" style="height:72px">${barsHTML}</div>
+        <div class="bar-day">${d.date.slice(3)}</div>`;
+      chartEl.appendChild(col);
+    });
+  }
+
+  // 7d totals
+  const wS = data.week.reduce((a, d) => a + d.staging, 0);
+  const wI = data.week.reduce((a, d) => a + d.internal, 0);
+  setText("w-staging", wS);
+  setText("w-internal", wI);
+  const pct = wS + wI > 0 ? Math.round((wS / (wS + wI)) * 100) : 50;
+  const rf = document.getElementById("ratio-fill");
+  if (rf) rf.style.width = pct + "%";
+  setText("ratio-left", `Staging (${wS})`);
+  setText("ratio-right", `Internal (${wI})`);
+
+  // Table
+  setText("table-count", `${data.recent.length} entries`);
+  const tbody = document.getElementById("recent-tbody");
+  if (tbody) {
+    if (data.recent.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty-state">No merges yet.</td></tr>`;
+    } else {
+      tbody.innerHTML = data.recent.map(r => {
+        const tagLabel = r.type === "staging" ? "→ staging" : r.type === "internal" ? "→ internal" : "reverted";
+        return `<tr>
+          <td><a class="pr-num-link" href="https://github.com/BerriAI/litellm/pull/${r.pr}" target="_blank" rel="noopener noreferrer">#${r.pr}</a></td>
+          <td><span class="pr-title-text" title="${r.title}">${r.title}</span></td>
+          <td><span class="pr-author">${r.author}</span></td>
+          <td><span class="tag tag-${r.type}" aria-label="Type: ${tagLabel}">${tagLabel}</span></td>
+          <td><time class="pr-time" datetime="${new Date(Date.now() - r.ms_ago).toISOString()}">${relTime(r.ms_ago)}</time></td>
+        </tr>`;
+      }).join("");
+    }
+  }
+}
+
+// Swap for real fetch:
+// fetch("/api/v1/dashboard").then(r => r.json()).then(render).catch(console.error);
+render(MOCK);
+
+// Clock tick
+setInterval(() => {
+  setText("ts", new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }));
+}, 30000);
+</script>
+</body>
+</html>

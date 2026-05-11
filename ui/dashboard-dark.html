@@ -1,0 +1,295 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Dashboard — shin-pr-review-agent</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{font:13px/1.5 -apple-system,system-ui,sans-serif;color:#e2e2e2;background:#0f0f12;min-height:100vh}
+
+  /* Topbar */
+  #topbar{display:flex;align-items:center;gap:10px;padding:9px 20px;border-bottom:1px solid #222;background:#0f0f12;position:sticky;top:0;z-index:10}
+  #topbar .wordmark{font-size:13px;font-weight:700;color:#e2e2e2;letter-spacing:-.01em}
+  #topbar .dot{color:#555}
+  #topbar .nav-links{display:flex;gap:2px;margin-left:auto}
+  .nav-link{font-size:12px;color:#666;text-decoration:none;padding:4px 10px;border-radius:4px}
+  .nav-link:hover{background:#1e1e26;color:#e2e2e2}
+  .nav-link.active{background:#1e1e26;color:#e2e2e2;font-weight:600}
+  #topbar .ts{font-size:11px;color:#444;margin-left:8px}
+
+  /* Page */
+  #page{max-width:1080px;margin:0 auto;padding:24px 20px 60px}
+
+  /* Section label */
+  .section-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#444;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+  .section-label::after{content:'';flex:1;height:1px;background:#1e1e26}
+
+  /* Stat row */
+  .stat-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:24px}
+  @media(max-width:760px){.stat-row{grid-template-columns:repeat(2,1fr)}}
+  .stat-card{background:#141418;border:1px solid #1e1e26;border-radius:8px;padding:14px 16px}
+  .stat-card .lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#555;margin-bottom:8px}
+  .stat-card .val{font-size:30px;font-weight:800;line-height:1;letter-spacing:-.03em}
+  .stat-card .sub{font-size:11px;color:#444;margin-top:5px}
+  .val-purple{color:#a78bfa}
+  .val-green{color:#34d399}
+  .val-red{color:#f87171}
+  .val-dim{color:#666}
+  .stat-card.accent-purple{border-color:#3d2f5a;background:#1a1228}
+  .stat-card.accent-green{border-color:#1a3d30;background:#0d1f1a}
+
+  /* Card */
+  .card{background:#141418;border:1px solid #1e1e26;border-radius:8px;padding:16px 18px;margin-bottom:10px}
+  .card-hd{font-size:12px;font-weight:700;color:#888;margin:0 0 14px;display:flex;align-items:center;gap:8px}
+  .pill{font-size:10px;padding:2px 7px;border-radius:10px;font-weight:600}
+  .pill-purple{background:#2d1f4a;color:#a78bfa}
+  .pill-green{background:#0d2e22;color:#34d399}
+  .pill-blue{background:#0d1e33;color:#60a5fa}
+
+  /* Two-col */
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:24px}
+  @media(max-width:880px){.two-col{grid-template-columns:1fr}}
+
+  /* Bar chart */
+  .bar-chart{display:flex;align-items:flex-end;gap:5px;height:72px;margin-bottom:8px}
+  .bar-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px}
+  .bar-wrap{flex:1;width:100%;display:flex;flex-direction:column;justify-content:flex-end}
+  .bar{width:100%;min-height:2px;transition:opacity .12s;cursor:default}
+  .bar:hover{opacity:.65}
+  .b-top{border-radius:3px 3px 0 0}
+  .b-bot{border-radius:0}
+  .b-only{border-radius:3px 3px 0 0}
+  .bar-s{background:#7c3aed}
+  .bar-i{background:#059669}
+  .bar-day{font-size:10px;color:#333;text-align:center}
+  .bar-val{font-size:10px;font-weight:700;color:#555;text-align:center;min-height:13px}
+  .legend{display:flex;gap:12px;margin-top:8px}
+  .leg{display:flex;align-items:center;gap:4px;font-size:11px;color:#555}
+  .leg-dot{width:8px;height:8px;border-radius:2px}
+  .leg-s{background:#7c3aed}
+  .leg-i{background:#059669}
+
+  /* Spark numbers */
+  .spark-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+  .spark-item .spark-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#555;margin-bottom:3px}
+  .spark-item .spark-val{font-size:28px;font-weight:800;letter-spacing:-.02em}
+  .spark-item .spark-sub{font-size:11px;color:#333;margin-top:2px}
+
+  /* Ratio bar */
+  .ratio-wrap{margin-top:4px}
+  .ratio-labels{display:flex;justify-content:space-between;font-size:10px;color:#444;margin-bottom:4px}
+  .ratio-bg{background:#1e1e26;border-radius:3px;height:6px;overflow:hidden}
+  .ratio-fill{height:100%;background:linear-gradient(90deg,#7c3aed 0%,#059669 100%);border-radius:3px;transition:width .5s ease}
+
+  /* Table */
+  .pr-table{width:100%;border-collapse:collapse;font-size:12px}
+  .pr-table th{text-align:left;padding:5px 10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#444;border-bottom:1px solid #1e1e26}
+  .pr-table td{padding:8px 10px;border-bottom:1px solid #181820;vertical-align:middle}
+  .pr-table tr:last-child td{border-bottom:0}
+  .pr-table tbody tr:hover td{background:#17171e}
+  .pr-link{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:#7c3aed;text-decoration:none}
+  .pr-link:hover{text-decoration:underline;color:#a78bfa}
+  .pr-title{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc}
+  .pr-author{font-size:11px;color:#444}
+  .pr-time{font-size:11px;color:#333;white-space:nowrap}
+  .tag{font-size:10px;padding:2px 6px;border-radius:3px;font-weight:700;letter-spacing:.02em}
+  .tag-staging{background:#2d1f4a;color:#a78bfa}
+  .tag-internal{background:#0d2e22;color:#34d399}
+  .tag-reverted{background:#2d1515;color:#f87171}
+
+  /* Pulse dot */
+  .live-dot{width:6px;height:6px;border-radius:50%;background:#34d399;display:inline-block;margin-right:4px;animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.8)}}
+</style>
+</head><body>
+
+<div id="topbar">
+  <span class="wordmark">shin-pr-review-agent</span>
+  <span class="dot">·</span>
+  <span style="font-size:11px;color:#444"><span class="live-dot"></span>live</span>
+  <div class="nav-links">
+    <a class="nav-link active" href="/dashboard">Dashboard</a>
+    <a class="nav-link" href="/runs">Runs</a>
+    <a class="nav-link" href="/chat">Chat</a>
+  </div>
+  <span class="ts" id="ts">—</span>
+</div>
+
+<div id="page">
+
+  <div class="section-label">Today — <span id="today-date">—</span></div>
+  <div class="stat-row">
+    <div class="stat-card accent-purple">
+      <div class="lbl">Merged → staging</div>
+      <div class="val val-purple" id="today-staging">—</div>
+      <div class="sub">individual PRs</div>
+    </div>
+    <div class="stat-card accent-green">
+      <div class="lbl">Staging → internal</div>
+      <div class="val val-green" id="today-internal">—</div>
+      <div class="sub">staging PRs shipped</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">Reverted</div>
+      <div class="val val-red" id="today-reverted">—</div>
+      <div class="sub">staging merges undone</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">Cap</div>
+      <div class="val val-dim" id="today-cap">—</div>
+      <div class="sub" id="cap-sub">daily merge slots</div>
+    </div>
+  </div>
+
+  <div class="section-label">Last 7 days</div>
+  <div class="two-col">
+
+    <div class="card">
+      <div class="card-hd">
+        Merges per day
+        <span class="pill pill-purple">staging</span>
+        <span class="pill pill-green">internal</span>
+      </div>
+      <div class="bar-chart" id="bar-chart"></div>
+      <div class="legend">
+        <span class="leg"><span class="leg-dot leg-s"></span>→ staging</span>
+        <span class="leg"><span class="leg-dot leg-i"></span>staging → internal</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-hd">7-day totals <span class="pill pill-blue">7d</span></div>
+      <div class="spark-row">
+        <div class="spark-item">
+          <div class="spark-lbl">→ Staging</div>
+          <div class="spark-val val-purple" id="w-staging">—</div>
+          <div class="spark-sub">PRs merged</div>
+        </div>
+        <div class="spark-item">
+          <div class="spark-lbl">→ Internal</div>
+          <div class="spark-val val-green" id="w-internal">—</div>
+          <div class="spark-sub">staging PRs merged</div>
+        </div>
+      </div>
+      <div class="ratio-wrap">
+        <div class="ratio-labels">
+          <span id="r-left">staging</span>
+          <span id="r-right">internal</span>
+        </div>
+        <div class="ratio-bg">
+          <div class="ratio-fill" id="ratio-fill" style="width:50%"></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="section-label">Recent merges</div>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table class="pr-table">
+      <thead>
+        <tr>
+          <th>PR</th>
+          <th>Title</th>
+          <th>Author</th>
+          <th>Type</th>
+          <th>When</th>
+        </tr>
+      </thead>
+      <tbody id="recent-tbody">
+        <tr><td colspan="5" style="text-align:center;color:#333;padding:20px;font-style:italic">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+const MOCK = {
+  today: { staging: 4, internal: 1, reverted: 0, cap_used: 4, cap_total: 10 },
+  week: [
+    { date: "05-05", staging: 2, internal: 0 },
+    { date: "05-06", staging: 7, internal: 1 },
+    { date: "05-07", staging: 5, internal: 2 },
+    { date: "05-08", staging: 3, internal: 1 },
+    { date: "05-09", staging: 0, internal: 0 },
+    { date: "05-10", staging: 6, internal: 1 },
+    { date: "05-11", staging: 4, internal: 1 },
+  ],
+  recent: [
+    { pr: 25810, title: "fix(proxy): handle timeout in LLM call correctly", author: "dev-user", type: "staging", ms: 12*60000 },
+    { pr: 25803, title: "feat(router): add retry backoff for rate-limited models", author: "contributor42", type: "staging", ms: 45*60000 },
+    { pr: 25799, title: "feat(guardrails): add prompt injection detection layer", author: "sec-bot", type: "staging", ms: 90*60000 },
+    { pr: 25791, title: "chore(deps): bump litellm to 1.35.2", author: "depbot", type: "internal", ms: 3*3600000 },
+    { pr: 25788, title: "fix(anthropic): correct token count for claude-3-5", author: "krrish", type: "staging", ms: 5*3600000 },
+    { pr: 25772, title: "feat(responses): wire /v1/responses to Bedrock models", author: "another-dev", type: "staging", ms: 28*3600000 },
+    { pr: 25760, title: "fix(streaming): handle CancelledError on mid-stream disconnect", author: "upstream", type: "reverted", ms: 30*3600000 },
+  ],
+};
+
+function rel(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+  return `${Math.floor(s/86400)}d ago`;
+}
+
+function render(d) {
+  const now = new Date();
+  document.getElementById("today-date").textContent = now.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
+  document.getElementById("ts").textContent = now.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"});
+
+  document.getElementById("today-staging").textContent = d.today.staging;
+  document.getElementById("today-internal").textContent = d.today.internal;
+  document.getElementById("today-reverted").textContent = d.today.reverted;
+  document.getElementById("today-cap").textContent = `${d.today.cap_used}/${d.today.cap_total}`;
+  document.getElementById("cap-sub").textContent = `of ${d.today.cap_total} slots used`;
+
+  // Bar chart
+  const maxVal = Math.max(...d.week.map(w => w.staging + w.internal), 1);
+  const el = document.getElementById("bar-chart");
+  el.innerHTML = "";
+  d.week.forEach((w,i) => {
+    const isToday = i === d.week.length - 1;
+    const total = w.staging + w.internal;
+    const H = Math.round((total / maxVal) * 64);
+    const sH = total > 0 ? Math.round((w.staging / total) * H) : 0;
+    const iH = H - sH;
+    const col = document.createElement("div");
+    col.className = "bar-col";
+    col.innerHTML = `
+      <div class="bar-val" style="${isToday?"color:#888":""}">${total||""}</div>
+      <div class="bar-wrap">
+        <div style="display:flex;flex-direction:column;width:100%;justify-content:flex-end;height:64px">
+          ${sH ? `<div class="bar bar-s ${iH?"b-top":"b-only"}" style="height:${sH}px;${isToday?"opacity:1":"opacity:.7"}" title="staging: ${w.staging}"></div>` : ""}
+          ${iH ? `<div class="bar bar-i b-bot" style="height:${iH}px;${isToday?"opacity:1":"opacity:.7"}" title="internal: ${w.internal}"></div>` : ""}
+        </div>
+      </div>
+      <div class="bar-day" style="${isToday?"color:#555":""}">${w.date.slice(3)}</div>`;
+    el.appendChild(col);
+  });
+
+  // 7d
+  const wS = d.week.reduce((a,w)=>a+w.staging,0);
+  const wI = d.week.reduce((a,w)=>a+w.internal,0);
+  document.getElementById("w-staging").textContent = wS;
+  document.getElementById("w-internal").textContent = wI;
+  const pct = wS+wI > 0 ? Math.round(wS/(wS+wI)*100) : 50;
+  document.getElementById("ratio-fill").style.width = pct+"%";
+  document.getElementById("r-left").textContent = `staging (${wS})`;
+  document.getElementById("r-right").textContent = `internal (${wI})`;
+
+  // Table
+  document.getElementById("recent-tbody").innerHTML = d.recent.map(r => `
+    <tr>
+      <td><a class="pr-link" href="https://github.com/BerriAI/litellm/pull/${r.pr}" target="_blank">#${r.pr}</a></td>
+      <td><span class="pr-title" title="${r.title}">${r.title}</span></td>
+      <td><span class="pr-author">${r.author}</span></td>
+      <td><span class="tag tag-${r.type}">${r.type==="staging"?"→ staging":r.type==="internal"?"→ internal":"reverted"}</span></td>
+      <td><span class="pr-time">${rel(r.ms)}</span></td>
+    </tr>`).join("");
+}
+
+render(MOCK);
+setInterval(()=>document.getElementById("ts").textContent=new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"}), 30000);
+</script>
+</body></html>

@@ -2826,12 +2826,21 @@ async function autoMergeReadyPr(
   const isBot = authorType === "Bot" || /\[bot\]$/.test(authorLogin);
 
   // Authors excluded from auto-merge by default. Extend via AUTOMERGE_EXCLUDED_AUTHORS
-  // env var (comma-separated logins, case-insensitive).
+  // env var (comma-separated logins or glob patterns, case-insensitive).
+  // Supports wildcards: *berri* matches harish-berri, krrish-berri, etc.
   const DEFAULT_EXCLUDED = ["sameerlite"];
   const envExcluded = (process.env.AUTOMERGE_EXCLUDED_AUTHORS ?? "")
     .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
-  const excludedAuthors = new Set([...DEFAULT_EXCLUDED, ...envExcluded]);
-  if (excludedAuthors.has(authorLogin.toLowerCase())) {
+  const excludedPatterns = [...DEFAULT_EXCLUDED, ...envExcluded];
+  const login = authorLogin.toLowerCase();
+  const isExcluded = excludedPatterns.some(pattern => {
+    if (pattern.includes("*")) {
+      const regex = new RegExp("^" + pattern.replace(/\*/g, ".*") + "$");
+      return regex.test(login);
+    }
+    return pattern === login;
+  });
+  if (isExcluded) {
     console.log(`[auto-merge] PR #${prNumber} author ${authorLogin} is excluded from auto-merge, skipping`);
     await db.recordAutomergeDecision(runId, {
       decision: "skipped",

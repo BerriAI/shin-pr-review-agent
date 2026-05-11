@@ -421,6 +421,7 @@ export async function claimStagingMergeSlot(
        SELECT COUNT(*)::int AS cnt
        FROM staging_merges
        WHERE repo = $2
+         AND merge_commit_sha IS NOT NULL
          AND merged_at >= (CURRENT_DATE AT TIME ZONE 'UTC')
          AND merged_at <  (CURRENT_DATE AT TIME ZONE 'UTC' + INTERVAL '1 day')
      ),
@@ -487,6 +488,23 @@ export async function listTodayStagingMergesForRebuild(repo: string): Promise<{ 
   return rows as { pr_number: number }[];
 }
 
+export async function listMergesForStagingPr(
+  stagingPrNumber: number,
+  repo: string,
+): Promise<{ pr_number: number; pr_title: string | null; merged_at_epoch: number }[]> {
+  const { rows } = await pool().query(
+    `SELECT sm.pr_number,
+            r.pr_title,
+            EXTRACT(EPOCH FROM sm.merged_at)::float8 AS merged_at_epoch
+     FROM staging_merges sm
+     LEFT JOIN runs r ON sm.run_id = r.run_id
+     WHERE sm.staging_pr_number = $1 AND sm.repo = $2 AND sm.reverted_at IS NULL AND sm.merge_commit_sha IS NOT NULL
+     ORDER BY sm.merged_at ASC`,
+    [stagingPrNumber, repo],
+  );
+  return rows as { pr_number: number; pr_title: string | null; merged_at_epoch: number }[];
+}
+
 export async function listStagingMerges(limit = 100): Promise<Record<string, unknown>[]> {
   const { rows } = await pool().query(
     `SELECT sm.id, sm.pr_number, sm.repo, sm.run_id,
@@ -496,6 +514,7 @@ export async function listStagingMerges(limit = 100): Promise<Record<string, unk
             r.pr_title, r.pr_author
      FROM staging_merges sm
      LEFT JOIN runs r ON sm.run_id = r.run_id
+     WHERE sm.merge_commit_sha IS NOT NULL
      ORDER BY sm.merged_at DESC
      LIMIT $1`,
     [limit],
@@ -503,6 +522,14 @@ export async function listStagingMerges(limit = 100): Promise<Record<string, unk
   return rows;
 }
 
+
+export async function markStagingPrClosed(stagingPrNumber: number, repo: string): Promise<void> {
+  await pool().query(
+    `UPDATE staging_merges SET staging_closed_at = NOW()
+     WHERE staging_pr_number = $1 AND repo = $2 AND staging_closed_at IS NULL`,
+    [stagingPrNumber, repo],
+  );
+}
 
 export interface DashboardStats {
   today: { staging: number; internal_queued: number; new_prs: number; reverted: number; cap_used: number; cap_total: number };

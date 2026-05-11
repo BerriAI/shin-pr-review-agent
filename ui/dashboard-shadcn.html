@@ -38,6 +38,10 @@
       --internal-fg: hsl(152 65% 28%);
       --internal-border: hsl(152 45% 84%);
       --internal-bar: hsl(152 55% 40%);
+      --newpr-bg: hsl(217 91% 95%);
+      --newpr-fg: hsl(217 80% 38%);
+      --newpr-border: hsl(217 70% 86%);
+      --newpr-bar: hsl(217 70% 52%);
       --reverted-bg: hsl(0 72% 96%);
       --reverted-fg: hsl(0 72% 40%);
     }
@@ -156,10 +160,11 @@
 
     /* ── stat cards ── */
     .stat-grid {
-      display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+      display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px;
       margin-bottom: 28px;
     }
-    @media (max-width: 768px) { .stat-grid { grid-template-columns: repeat(2, 1fr) } }
+    @media (max-width: 900px) { .stat-grid { grid-template-columns: repeat(3, 1fr) } }
+    @media (max-width: 600px) { .stat-grid { grid-template-columns: repeat(2, 1fr) } }
     .stat-card {
       background: var(--card); border: 1px solid var(--border);
       border-radius: var(--radius); padding: 16px 18px;
@@ -190,6 +195,8 @@
     .stat-card.card-staging .stat-value { color: var(--staging-fg) }
     .stat-card.card-internal { border-color: var(--internal-border) }
     .stat-card.card-internal .stat-value { color: var(--internal-fg) }
+    .stat-card.card-newpr { border-color: var(--newpr-border) }
+    .stat-card.card-newpr .stat-value { color: var(--newpr-fg) }
     .stat-card.card-destructive { border-color: hsl(0 60% 88%) }
     .stat-card.card-destructive .stat-value { color: var(--destructive) }
 
@@ -231,6 +238,7 @@
     }
     .badge-staging { background: var(--staging-bg); color: var(--staging-fg); border-color: var(--staging-border) }
     .badge-internal { background: var(--internal-bg); color: var(--internal-fg); border-color: var(--internal-border) }
+    .badge-newpr { background: var(--newpr-bg); color: var(--newpr-fg); border-color: var(--newpr-border) }
     .badge-neutral { background: var(--secondary); color: var(--foreground); border-color: var(--border) }
 
     /* ── bar chart ── */
@@ -250,8 +258,29 @@
       transition: opacity 0.12s;
     }
     .bar:hover { opacity: 0.7; cursor: default }
+    /* 3 distinct patterns for grayscale: solid / diagonal / vertical stripe */
     .bar-s { background: var(--staging-bar); border-radius: 3px 3px 0 0 }
-    .bar-i { background: var(--internal-bar) }
+    /* New PRs filed: vertical stripe */
+    .bar-n {
+      background-color: var(--newpr-bar);
+      background-image: repeating-linear-gradient(
+        90deg,
+        transparent, transparent 3px,
+        rgba(255,255,255,0.45) 3px, rgba(255,255,255,0.45) 5px
+      );
+    }
+    .bar-n.only { border-radius: 3px 3px 0 0 }
+    .bar-n.has-s { border-radius: 0 }
+    .bar-i {
+      background-color: var(--internal-bar);
+      background-image: repeating-linear-gradient(
+        -45deg,
+        transparent,
+        transparent 3px,
+        rgba(255,255,255,0.45) 3px,
+        rgba(255,255,255,0.45) 5px
+      );
+    }
     .bar-s.only { border-radius: 3px 3px 0 0 }
     .bar-i.has-s { border-radius: 0 }
     .bar-i.only { border-radius: 3px 3px 0 0 }
@@ -262,7 +291,22 @@
     .legend-item { display: flex; align-items: center; gap: 5px; font-size: 0.75rem; color: var(--muted-foreground) }
     .legend-swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0 }
     .swatch-s { background: var(--staging-bar) }
-    .swatch-i { background: var(--internal-bar) }
+    .swatch-n {
+      background-color: var(--newpr-bar);
+      background-image: repeating-linear-gradient(
+        90deg,
+        transparent, transparent 3px,
+        rgba(255,255,255,0.5) 3px, rgba(255,255,255,0.5) 5px
+      );
+    }
+    .swatch-i {
+      background-color: var(--internal-bar);
+      background-image: repeating-linear-gradient(
+        -45deg,
+        transparent, transparent 2px,
+        rgba(255,255,255,0.45) 2px, rgba(255,255,255,0.45) 4px
+      );
+    }
 
     /* ── 7d totals ── */
     .totals-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px }
@@ -288,10 +332,25 @@
     .ratio-bg {
       height: 6px; background: var(--secondary); border-radius: 9999px; overflow: hidden;
     }
+    /* Ratio bar: two explicit segments, gap between — readable in grayscale */
+    .ratio-bg {
+      display: flex; gap: 3px; align-items: stretch;
+      background: transparent; overflow: visible;
+    }
     .ratio-fill {
-      height: 100%; border-radius: 9999px;
-      background: linear-gradient(90deg, var(--staging-bar), var(--internal-bar));
+      height: 6px; border-radius: 9999px;
+      background: var(--staging-bar);
       transition: width 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+      flex-shrink: 0;
+    }
+    .ratio-fill-b {
+      height: 6px; border-radius: 9999px; flex: 1;
+      background-color: var(--internal-bar);
+      background-image: repeating-linear-gradient(
+        -45deg,
+        transparent, transparent 3px,
+        rgba(255,255,255,0.4) 3px, rgba(255,255,255,0.4) 5px
+      );
     }
 
     /* ── table ── */
@@ -404,7 +463,7 @@
     <div class="section-divider" role="presentation"></div>
   </div>
 
-  <div class="stat-grid" role="region" aria-label="Today's merge statistics">
+  <div class="stat-grid" role="region" aria-label="Today's statistics">
     <div class="stat-card card-staging">
       <div class="stat-label">
         <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1L15 14H1L8 1Z" fill="currentColor" opacity=".4"/><path d="M8 5L12 12H4L8 5Z" fill="currentColor"/></svg>
@@ -416,10 +475,18 @@
     <div class="stat-card card-internal">
       <div class="stat-label">
         <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="3" fill="currentColor"/><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
-        Staging → Internal
+        On Internal Staging
       </div>
       <div class="stat-value" id="today-internal" aria-live="polite">—</div>
-      <div class="stat-desc">Staging PRs shipped</div>
+      <div class="stat-desc">Individual PRs queued now</div>
+    </div>
+    <div class="stat-card card-newpr">
+      <div class="stat-label">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        New PRs Filed
+      </div>
+      <div class="stat-value" id="today-newpr" aria-live="polite">—</div>
+      <div class="stat-desc">Opened in BerriAI/litellm today</div>
     </div>
     <div class="stat-card card-destructive">
       <div class="stat-label">
@@ -452,14 +519,14 @@
     <div class="section" role="region" aria-label="Daily merge chart">
       <div class="section-body">
         <div class="card-title">
-          Merges per day
+          Activity per day
           <span class="badge badge-staging">→ staging</span>
-          <span class="badge badge-internal">→ internal</span>
+          <span class="badge badge-newpr">new PRs</span>
         </div>
-        <div class="bar-chart-wrap" id="bar-chart" aria-label="Bar chart of merges per day, last 7 days" role="img"></div>
+        <div class="bar-chart-wrap" id="bar-chart" aria-label="Bar chart of merges and new PRs per day, last 7 days" role="img"></div>
         <div class="chart-legend">
-          <span class="legend-item"><span class="legend-swatch swatch-s" aria-hidden="true"></span>→ Staging branch</span>
-          <span class="legend-item"><span class="legend-swatch swatch-i" aria-hidden="true"></span>Staging → Internal</span>
+          <span class="legend-item"><span class="legend-swatch swatch-s" aria-hidden="true"></span>Merged → staging</span>
+          <span class="legend-item"><span class="legend-swatch swatch-n" aria-hidden="true"></span>New PRs filed</span>
         </div>
       </div>
     </div>
@@ -473,19 +540,20 @@
             <div class="total-val" id="w-staging">—</div>
             <div class="total-sub">PRs merged this week</div>
           </div>
-          <div class="total-item t-internal">
-            <div class="total-label">→ Internal</div>
-            <div class="total-val" id="w-internal">—</div>
-            <div class="total-sub">Staging PRs shipped</div>
+          <div class="total-item" style="--tv:var(--newpr-fg)">
+            <div class="total-label">New PRs Filed</div>
+            <div class="total-val" id="w-newpr" style="color:var(--newpr-fg)">—</div>
+            <div class="total-sub">Opened this week</div>
           </div>
         </div>
         <div class="ratio-wrap">
           <div class="ratio-labels">
-            <span id="ratio-left">Staging</span>
-            <span id="ratio-right">Internal</span>
+            <span id="ratio-left">Merged</span>
+            <span id="ratio-right">Filed</span>
           </div>
-          <div class="ratio-bg" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="ratio-pb">
+          <div class="ratio-bg" role="img" id="ratio-pb" aria-label="Staging vs internal ratio">
             <div class="ratio-fill" id="ratio-fill" style="width:50%"></div>
+            <div class="ratio-fill-b" id="ratio-fill-b"></div>
           </div>
         </div>
       </div>
@@ -528,15 +596,21 @@
 //   fetch("/api/v1/dashboard").then(r => r.json()).then(render);
 // ---------------------------------------------------------------------------
 const MOCK = {
-  today: { staging: 4, internal: 1, reverted: 0, cap_used: 4, cap_total: 10 },
+  today: {
+    staging: 4,          // PRs merged to agent staging branch today
+    internal_queued: 12, // individual PRs currently sitting on internal staging branch (snapshot)
+    new_prs: 8,          // new PRs opened in BerriAI/litellm today
+    reverted: 0,
+    cap_used: 4, cap_total: 10
+  },
   week: [
-    { date: "05-05", staging: 2, internal: 0 },
-    { date: "05-06", staging: 7, internal: 1 },
-    { date: "05-07", staging: 5, internal: 2 },
-    { date: "05-08", staging: 3, internal: 1 },
-    { date: "05-09", staging: 0, internal: 0 },
-    { date: "05-10", staging: 6, internal: 1 },
-    { date: "05-11", staging: 4, internal: 1 },
+    { date: "05-05", staging: 2, new_prs: 14 },
+    { date: "05-06", staging: 7, new_prs: 22 },
+    { date: "05-07", staging: 5, new_prs: 18 },
+    { date: "05-08", staging: 3, new_prs: 11 },
+    { date: "05-09", staging: 0, new_prs: 3  },
+    { date: "05-10", staging: 6, new_prs: 19 },
+    { date: "05-11", staging: 4, new_prs: 8  },
   ],
   recent: [
     { pr: 25810, title: "fix(proxy): handle timeout in LLM call correctly", author: "dev-user", type: "staging", ms_ago: 12*60000 },
@@ -570,9 +644,10 @@ function render(data) {
 
   // Today
   setText("today-staging", data.today.staging);
-  setText("today-internal", data.today.internal);
+  setText("today-internal", data.today.internal_queued);
+  setText("today-newpr", data.today.new_prs);
   setText("today-reverted", data.today.reverted);
-  setText("today-cap", `${data.today.cap_used} / ${data.today.cap_total}`);
+  setText("today-cap", `${data.today.cap_used} / ${data.today.cap_total}`);
   setText("cap-desc", `${data.today.cap_used} of ${data.today.cap_total} daily slots used`);
   const capPct = Math.round((data.today.cap_used / data.today.cap_total) * 100);
   const capBar = document.getElementById("cap-bar");
@@ -580,20 +655,18 @@ function render(data) {
     capBar.style.width = capPct + "%";
     capBar.className = "cap-bar-fill" + (capPct >= 100 ? " full" : capPct >= 70 ? " warn" : "");
   }
-  const pb = document.getElementById("ratio-pb");
-  if (pb) pb.setAttribute("aria-valuenow", capPct);
 
-  // Bar chart
-  const maxVal = Math.max(...data.week.map(d => d.staging + d.internal), 1);
+  // Bar chart — staging (solid) + new PRs filed (vertical stripe)
+  const maxVal = Math.max(...data.week.map(d => d.staging + d.new_prs), 1);
   const chartEl = document.getElementById("bar-chart");
   if (chartEl) {
     chartEl.innerHTML = "";
     data.week.forEach((d, i) => {
       const isToday = i === data.week.length - 1;
-      const total = d.staging + d.internal;
+      const total = d.staging + d.new_prs;
       const H = Math.round((total / maxVal) * 72);
       const sH = total > 0 ? Math.round((d.staging / total) * H) : 0;
-      const iH = H - sH;
+      const nH = H - sH;
       const col = document.createElement("div");
       col.className = "bar-col" + (isToday ? " bar-today-wrap" : "");
 
@@ -601,8 +674,8 @@ function render(data) {
       if (total === 0) {
         barsHTML = `<div class="bar-zero"></div>`;
       } else {
-        if (sH) barsHTML += `<div class="bar bar-s${iH ? "" : " only"}" style="height:${sH}px;opacity:${isToday ? 1 : .65}" title="→ staging: ${d.staging}"></div>`;
-        if (iH) barsHTML += `<div class="bar bar-i${sH ? " has-s" : " only"}" style="height:${iH}px;opacity:${isToday ? 1 : .65}" title="→ internal: ${d.internal}"></div>`;
+        if (sH) barsHTML += `<div class="bar bar-s${nH ? "" : " only"}" style="height:${sH}px;opacity:${isToday ? 1 : .65}" title="Merged to staging: ${d.staging}"></div>`;
+        if (nH) barsHTML += `<div class="bar bar-n${sH ? " has-s" : " only"}" style="height:${nH}px;opacity:${isToday ? 1 : .65}" title="New PRs filed: ${d.new_prs}"></div>`;
       }
 
       col.innerHTML = `
@@ -615,14 +688,15 @@ function render(data) {
 
   // 7d totals
   const wS = data.week.reduce((a, d) => a + d.staging, 0);
-  const wI = data.week.reduce((a, d) => a + d.internal, 0);
+  const wN = data.week.reduce((a, d) => a + d.new_prs, 0);
   setText("w-staging", wS);
-  setText("w-internal", wI);
-  const pct = wS + wI > 0 ? Math.round((wS / (wS + wI)) * 100) : 50;
+  setText("w-newpr", wN);
+  const pct = wS + wN > 0 ? Math.round((wS / (wS + wN)) * 100) : 50;
   const rf = document.getElementById("ratio-fill");
   if (rf) rf.style.width = pct + "%";
-  setText("ratio-left", `Staging (${wS})`);
-  setText("ratio-right", `Internal (${wI})`);
+  setText("ratio-left", `Merged (${wS})`);
+  setText("ratio-right", `Filed (${wN})`);
+
 
   // Table
   setText("table-count", `${data.recent.length} entries`);

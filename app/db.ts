@@ -504,6 +504,89 @@ export async function listStagingMerges(limit = 100): Promise<Record<string, unk
 }
 
 
+export interface DashboardStats {
+  today: { staging: number; internal_queued: number; new_prs: number; reverted: number; cap_used: number; cap_total: number };
+  week: { date: string; staging: number; new_prs: number }[];
+  recent: { pr: number; title: string; author: string; type: "staging" | "reverted"; ms_ago: number; staging_pr_url: string | null }[];
+}
+
+export async function getDashboardStats(capTotal: number): Promise<DashboardStats> {
+  const p = pool();
+  const [todayMerged, onStaging, revertedToday, capToday, newPrsToday, weekRows, recentRows] =
+    await Promise.all([
+      p.query(`SELECT COUNT(*)::int AS n FROM staging_merges
+               WHERE merged_at >= DATE_TRUNC('day', NOW()) AND reverted_at IS NULL`),
+      p.query(`SELECT COUNT(*)::int AS n FROM staging_merges WHERE reverted_at IS NULL`),
+      p.query(`SELECT COUNT(*)::int AS n FROM staging_merges
+               WHERE reverted_at >= DATE_TRUNC('day', NOW())`),
+      p.query(`SELECT COUNT(*)::int AS n FROM staging_merges
+               WHERE merged_at >= DATE_TRUNC('day', NOW())`),
+      p.query(`SELECT COUNT(DISTINCT pr_number)::int AS n FROM runs
+               WHERE ts >= DATE_TRUNC('day', NOW())`),
+      p.query(`
+        WITH days AS (
+          SELECT generate_series(
+            DATE_TRUNC('day', NOW()) - INTERVAL '6 days',
+            DATE_TRUNC('day', NOW()), '1 day'
+          )::date AS day
+        ),
+        staged AS (
+          SELECT DATE_TRUNC('day', merged_at)::date AS day, COUNT(*)::int AS n
+          FROM staging_merges
+          WHERE merged_at >= NOW() - INTERVAL '7 days' AND reverted_at IS NULL
+          GROUP BY 1
+        ),
+        reviewed AS (
+          SELECT DATE_TRUNC('day', ts)::date AS day, COUNT(DISTINCT pr_number)::int AS n
+          FROM runs WHERE ts >= NOW() - INTERVAL '7 days'
+          GROUP BY 1
+        )
+        SELECT d.day,
+               COALESCE(staged.n, 0) AS staging,
+               COALESCE(reviewed.n, 0) AS new_prs
+        FROM days d
+        LEFT JOIN staged ON staged.day = d.day
+        LEFT JOIN reviewed ON reviewed.day = d.day
+        ORDER BY d.day
+      `),
+      p.query(`
+        SELECT sm.pr_number, sm.staging_pr_url,
+               EXTRACT(EPOCH FROM sm.merged_at)::float8 AS merged_at_epoch,
+               sm.reverted_at,
+               r.pr_title, r.pr_author
+        FROM staging_merges sm
+        LEFT JOIN runs r ON sm.run_id = r.run_id
+        ORDER BY sm.merged_at DESC LIMIT 20
+      `),
+    ]);
+
+  const now = Date.now();
+  return {
+    today: {
+      staging: todayMerged.rows[0].n,
+      internal_queued: onStaging.rows[0].n,
+      new_prs: newPrsToday.rows[0].n,
+      reverted: revertedToday.rows[0].n,
+      cap_used: Math.min(capToday.rows[0].n, capTotal),
+      cap_total: capTotal,
+    },
+    week: weekRows.rows.map((r: Record<string, unknown>) => {
+      const d = new Date(r.day as string);
+      const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+      const dd = String(d.getUTCDate()).padStart(2, "0");
+      return { date: `${mm}-${dd}`, staging: r.staging as number, new_prs: r.new_prs as number };
+    }),
+    recent: recentRows.rows.map((sm: Record<string, unknown>) => ({
+      pr: sm.pr_number as number,
+      title: (sm.pr_title as string) || `PR #${sm.pr_number}`,
+      author: (sm.pr_author as string) || "unknown",
+      type: sm.reverted_at ? "reverted" : "staging",
+      ms_ago: now - (sm.merged_at_epoch as number) * 1000,
+      staging_pr_url: (sm.staging_pr_url as string) ?? null,
+    })),
+  };
+}
+
 // Fill in merge results after the GitHub merge API call succeeds.
 export async function updateStagingMergeResult(
   prNumber: number,

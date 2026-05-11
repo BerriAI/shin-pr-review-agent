@@ -1876,6 +1876,14 @@ app.get("/api/agent-info", requireLogin, async (_req, res) => {
   res.json({ tools, skills });
 });
 
+app.get("/api/v1/dashboard", requireLogin, async (_req, res) => {
+  try {
+    res.json(await db.getDashboardStats(DAILY_MERGE_CAP));
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
 // --- OpenAPI / Swagger docs ---------------------------------------------------

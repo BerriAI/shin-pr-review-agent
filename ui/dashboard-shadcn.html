@@ -648,37 +648,12 @@
 </main>
 
 <script>
-// ---------------------------------------------------------------------------
-// Mock data — swap render(MOCK) for:
-//   fetch("/api/v1/dashboard").then(r => r.json()).then(render);
-// ---------------------------------------------------------------------------
-const MOCK = {
-  today: {
-    staging: 4,          // PRs merged to agent staging branch today
-    internal_queued: 12, // individual PRs currently sitting on internal staging branch (snapshot)
-    new_prs: 8,          // new PRs opened in BerriAI/litellm today
-    reverted: 0,
-    cap_used: 4, cap_total: 10
-  },
-  week: [
-    { date: "05-05", staging: 2, new_prs: 14 },
-    { date: "05-06", staging: 7, new_prs: 22 },
-    { date: "05-07", staging: 5, new_prs: 18 },
-    { date: "05-08", staging: 3, new_prs: 11 },
-    { date: "05-09", staging: 0, new_prs: 3  },
-    { date: "05-10", staging: 6, new_prs: 19 },
-    { date: "05-11", staging: 4, new_prs: 8  },
-  ],
-  recent: [
-    { pr: 25810, title: "fix(proxy): handle timeout in LLM call correctly", author: "dev-user", type: "staging", ms_ago: 12*60000 },
-    { pr: 25803, title: "feat(router): add retry backoff for rate-limited models", author: "contributor42", type: "staging", ms_ago: 45*60000 },
-    { pr: 25799, title: "feat(guardrails): add prompt injection detection", author: "sec-bot", type: "staging", ms_ago: 90*60000 },
-    { pr: 25791, title: "chore(deps): bump litellm to 1.35.2", author: "depbot", type: "internal", ms_ago: 3*3600000 },
-    { pr: 25788, title: "fix(anthropic): correct token count for claude-3-5", author: "krrish", type: "staging", ms_ago: 5*3600000 },
-    { pr: 25772, title: "feat(responses): wire /v1/responses to Bedrock models", author: "another-dev", type: "staging", ms_ago: 28*3600000 },
-    { pr: 25760, title: "fix(streaming): handle CancelledError on disconnect", author: "upstream", type: "reverted", ms_ago: 30*3600000 },
-  ],
-};
+function loadDashboard() {
+  authFetch("/api/v1/dashboard")
+    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(render)
+    .catch(err => console.error("[dashboard] load failed:", err));
+}
 
 function relTime(ms) {
   const s = Math.floor(ms / 1000);
@@ -695,9 +670,9 @@ function setText(id, val) {
 
 function render(data) {
   const now = new Date();
-  const dateStr = now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  const dateStr = now.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
   setText("page-subtitle", `Stats for ${dateStr} — BerriAI/litellm`);
-  setText("ts", now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }));
+  setText("ts", now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }));
 
   // Today
   setText("today-staging", data.today.staging);
@@ -776,13 +751,12 @@ function render(data) {
   }
 }
 
-// Swap for real fetch:
-// fetch("/api/v1/dashboard").then(r => r.json()).then(render).catch(console.error);
-render(MOCK);
+loadDashboard();
+setInterval(loadDashboard, 60000);
 
 // Clock tick
 setInterval(() => {
-  setText("ts", new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }));
+  setText("ts", new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }));
 }, 30000);
 // ── PR tab switching ─────────────────────────────────────────────────────────
 const PR_TABS = [

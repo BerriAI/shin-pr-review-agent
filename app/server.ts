@@ -738,6 +738,29 @@ async function runWebhookReview(
   const injectionHit = detectPromptInjection([pr.title ?? "", pr.body ?? "", pr.head?.ref ?? ""]);
   if (injectionHit) {
     console.warn(`[webhook] delivery=${delivery} PR #${prNumber} BLOCKED — prompt injection detected: ${injectionHit}`);
+    const injRunId = randomUUID().replace(/-/g, "");
+    await db.insertRun({
+      run_id: injRunId,
+      ts: Date.now() / 1000,
+      pr_url: pr.html_url,
+      pr_number: prNumber,
+      pr_title: pr.title ?? null,
+      pr_author: pr.user?.login ?? null,
+      source: "webhook_injection_block",
+      card: {
+        score: 0,
+        verdict: "BLOCKED",
+        emoji: "🚨",
+        verdict_one_liner: `Prompt injection detected: ${injectionHit}`,
+        justification: `PR metadata contains patterns consistent with a prompt injection attack (matched rule: \`${injectionHit}\`). Automated review refused. Human review required.`,
+      },
+      fuse_trace: [],
+      triage: {},
+      pattern: {},
+      karpathy_check: {},
+      gate_results: [],
+      timing: {},
+    }).catch((err) => console.warn(`[injection] insertRun failed for PR #${prNumber}:`, err));
     await fetch(
       `https://api.github.com/repos/${repoFullName}/issues/${prNumber}/comments`,
       {

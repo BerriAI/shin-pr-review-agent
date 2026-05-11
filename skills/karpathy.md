@@ -17,6 +17,12 @@ The PR URL is given to you directly. Use the `gh` CLI and your bash/read tools t
 3. Read the changed files carefully. Focus on:
    - Production-behavior regressions (silent failures, wrong defaults, broken hot paths)
    - Scope drift (fix is narrower or wider than the linked issue)
+     For any feature or fix that operates on a request lifecycle:
+       - Enumerate every distinct request path the code is supposed to cover (non-streaming, streaming, streaming-with-guardrails, passthrough, etc.)
+       - For each path, trace whether the changed code actually runs end-to-end on that path — not just whether it runs on the happy path shown in the PR description or demo videos
+       - If the PR description says "path X is handled by a different mechanism", verify that other mechanism actually exists and works; do not accept the claim on its own
+       - If a path is silently unprotected, treat it as scope drift even if the PR author acknowledges it in a comment — acknowledgement in a comment is not the same as correct behaviour
+     (Original bullet retained above as the summary; the sub-bullets are the enforcement rules)
    - Dead code or unreachable branches introduced
    - Performance regressions on hot paths (routing, middleware, common LLM provider paths)
    - Maintainability risks (magic constants, missing error handling in critical paths)
@@ -57,6 +63,8 @@ A change that touches a streaming iterator hook and only handles the chat-comple
 
 ## Hard rules
 
+- For any asyncio task or background goroutine introduced, trace its full lifetime across every exit path of the enclosing function: success, `CancelledError`, and every other exception class the called coroutine can raise. If the task is not cancelled/awaited on every exit path, flag it as a resource leak regardless of how unlikely the non-success paths are. Check for `try/finally`, not just `try/except` matching specific exceptions.
+- If you see a `while` loop containing `asyncio.sleep`, investigate further: confirm the loop has a bounded exit condition, that the task is properly cancelled on shutdown, and that exceptions inside the loop do not silently swallow errors and spin forever.
 - Only cite files/symbols you actually read. Never invent.
 - If a file is truncated, say so in the finding rather than guessing.
 - VERDICT `decision` (must match what you put in the JSON):
@@ -109,7 +117,8 @@ Schema:
     "endpoints_touched": ["/v1/chat/completions"],
     "endpoints_claimed": ["/v1/chat/completions", "/v1/messages"],
     "cross_endpoint_risk": false,
-    "tests_pin_single_route": false
+    "tests_pin_single_route": false,
+    "traffic_paths_verified": ["non-streaming", "streaming", "passthrough"]
   }
 }
 ```

@@ -2824,6 +2824,23 @@ async function autoMergeReadyPr(
   const authorLogin = prState.user.login;
   const authorType = prState.user.type;
   const isBot = authorType === "Bot" || /\[bot\]$/.test(authorLogin);
+
+  // Authors excluded from auto-merge by default. Extend via AUTOMERGE_EXCLUDED_AUTHORS
+  // env var (comma-separated logins, case-insensitive).
+  const DEFAULT_EXCLUDED = ["sameerlite"];
+  const envExcluded = (process.env.AUTOMERGE_EXCLUDED_AUTHORS ?? "")
+    .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+  const excludedAuthors = new Set([...DEFAULT_EXCLUDED, ...envExcluded]);
+  if (excludedAuthors.has(authorLogin.toLowerCase())) {
+    console.log(`[auto-merge] PR #${prNumber} author ${authorLogin} is excluded from auto-merge, skipping`);
+    await db.recordAutomergeDecision(runId, {
+      decision: "skipped",
+      reason: "author_excluded",
+      evidence: { author: authorLogin },
+    });
+    return;
+  }
+
   const { claimed, countToday } = await db.claimStagingMergeSlot(prNumber, repo, DAILY_MERGE_CAP);
   if (!claimed) {
     console.log(`[auto-merge] PR #${prNumber} cap reached or already staged (${countToday}/${DAILY_MERGE_CAP} today)`);

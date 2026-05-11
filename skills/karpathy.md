@@ -74,13 +74,13 @@ A change that touches a streaming iterator hook and only handles the chat-comple
 
 ## Output
 
-### Zone 1 — Analysis (free-form)
+### Zone 1 — Summary (≤ 240 characters, plain text, no markdown)
 
-Write your findings in plain prose. No format constraints. Think through the diff here.
+One or two sentences max. State the decision and the single most important reason. No headers, no bullet points, no code blocks. Example: "BLOCK — new counter bypasses _inc_labeled_counter, losing label_context and cardinality cap. One-line fix required."
 
 ### Zone 2 — Verdict (machine-parsed)
 
-After analysis, output your verdict as the **last line** of your reply. Rules:
+After the summary, output your verdict as the **last line** of your reply. Rules:
 - Prefix the line with exactly `VERDICT: ` (uppercase, colon, space)
 - Single-line JSON only — no newlines inside the object
 - No code fences, no markdown formatting, no trailing text after the JSON

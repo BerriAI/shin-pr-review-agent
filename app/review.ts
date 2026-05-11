@@ -2660,7 +2660,16 @@ export async function promptChatSession(
     `promptChatSession: ensured session, availableTools=${JSON.stringify(availableTools)}`,
   );
   return runQueued(thread, async () => {
-    const { output, toolTrace } = await runChatTurn(thread, message);
+    const { output: rawOutput, toolTrace } = await runChatTurn(thread, message);
+    // Strip the machine-parsed VERDICT: JSON line from chat output — users see
+    // the Zone 1 summary only (≤240 chars per skill prompt). Keeps Slack/chat
+    // replies brief while the VERDICT is already persisted via karpathy_check.
+    const output = rawOutput
+      .split("\n")
+      .filter(l => !l.trimStart().startsWith("VERDICT:"))
+      .join("\n")
+      .trim()
+      .slice(0, 280); // hard cap in case the agent ignores the 240-char instruction
     thread.turns.push({ role: "user", content: message });
     thread.turns.push({
       role: "assistant",

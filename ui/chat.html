@@ -1,47 +1,110 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>litellm-bot dev chat</title>
+<html><head>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+  <meta charset="utf-8"><title>Chat — shin-pr-review-agent</title>
 <style>
-  *{box-sizing:border-box}
-  body{font:14px/1.5 -apple-system,system-ui,sans-serif;margin:0;color:#222;height:100vh;display:flex}
-  #sidebar{width:240px;border-right:1px solid #ddd;background:#f5f5f7;display:flex;flex-direction:column;height:100vh}
-  #sidebar-head{padding:12px;border-bottom:1px solid #e0e0e3;display:flex;gap:8px;align-items:center}
-  #sidebar-head h2{font-size:13px;margin:0;flex:1;color:#333}
-  #new-btn{padding:6px 10px;border:0;border-radius:4px;background:#222;color:#fff;cursor:pointer;font:inherit;font-size:12px}
-  #threads{flex:1;overflow-y:auto;padding:6px}
-  .thread{padding:8px 10px;border-radius:5px;cursor:pointer;display:flex;align-items:center;gap:6px;margin-bottom:2px;color:#444}
-  .thread:hover{background:#e8e8ec}
-  .thread.active{background:#222;color:#fff}
-  .thread.active .del{color:#bbb}
-  .thread .title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
-  .thread .del{border:0;background:transparent;color:#999;cursor:pointer;font-size:14px;padding:0 4px;visibility:hidden}
-  .thread:hover .del{visibility:visible}
-  .thread.active .del:hover{color:#fff}
-  #main{flex:1;display:flex;flex-direction:column;height:100vh;max-width:900px;margin:0 auto;padding:24px;overflow:hidden}
-  h1{font-size:18px;margin:0 0 4px}
-  .sub{color:#666;font-size:12px;margin-bottom:16px}
-  #log{flex:1;border:1px solid #ddd;border-radius:6px;padding:12px;overflow-y:auto;background:#fafafa}
-  .msg{margin:0 0 14px;white-space:pre-wrap;word-wrap:break-word}
-  .user{color:#0a4}
-  .bot{color:#222}
-  .tool{color:#888;font-family:ui-monospace,Menlo,monospace;font-size:12px;background:#eef;border-left:3px solid #88a;padding:6px 8px;margin:4px 0;border-radius:3px}
-  .err{color:#c00}
-  form{display:flex;gap:8px;margin-top:12px}
-  input[type=text]{flex:1;padding:10px;border:1px solid #ccc;border-radius:6px;font:inherit}
-  button{padding:10px 16px;border:0;border-radius:6px;background:#222;color:#fff;cursor:pointer;font:inherit}
-  button:disabled{opacity:.5;cursor:wait}
-  .hint{color:#888;font-size:12px;margin-top:8px}
-  .empty{color:#999;font-size:12px;text-align:center;padding:16px}
-  #sidebar-foot{padding:10px 12px;border-top:1px solid #e0e0e3}
-  #logout-form{margin:0}
-  #logout-btn{width:100%;padding:7px 10px;border:1px solid #ccc;border-radius:4px;
-              background:#fff;color:#444;cursor:pointer;font:inherit;font-size:12px}
-  #logout-btn:hover{background:#eee}
-</style></head>
+    :root {
+      --bg: hsl(0 0% 100%);
+      --fg: hsl(240 10% 3.9%);
+      --border: hsl(240 5.9% 90%);
+      --muted: hsl(240 4.8% 95.9%);
+      --muted-fg: hsl(240 3.8% 46.1%);
+      --sidebar-bg: hsl(240 4.8% 96.5%);
+      --card: hsl(0 0% 100%);
+      --primary: hsl(240 5.9% 10%);
+      --primary-fg: hsl(0 0% 98%);
+      --radius: 6px;
+      --ring: hsl(240 5.9% 10%);
+      --green-bg: hsl(152 60% 94%); --green-fg: hsl(152 65% 28%); --green-border: hsl(152 45% 84%);
+      --amber-bg: hsl(38 92% 95%);  --amber-fg: hsl(38 92% 30%);  --amber-border: hsl(38 80% 82%);
+      --red-bg:   hsl(0 72% 96%);   --red-fg:   hsl(0 72% 40%);   --red-border:   hsl(0 60% 88%);
+      --blue-bg:  hsl(217 91% 95%); --blue-fg:  hsl(217 80% 38%); --blue-border:  hsl(217 70% 86%);
+      --violet-bg:hsl(263 85% 96%); --violet-fg:hsl(263 70% 40%); --violet-border:hsl(263 60% 88%);
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0}
+    :focus-visible{outline:2px solid var(--ring);outline-offset:2px;border-radius:calc(var(--radius) - 2px)}
+
+    html{height:100%}
+    body{font:13px/1.5 'Geist',-apple-system,BlinkMacSystemFont,sans-serif;color:var(--fg);background:var(--bg);display:flex;flex-direction:column;height:100vh;overflow:hidden}
+    .app-body{display:flex;flex:1;overflow:hidden}
+
+    /* ── Topbar (same as dashboard) ── */
+    #topbar{position:relative;flex-shrink:0;height:57px;z-index:10;display:flex;align-items:center;gap:0;padding:0 20px;border-bottom:1px solid var(--border);background:var(--bg)}
+    .topbar-brand{display:flex;align-items:center;gap:8px;padding-right:16px;border-right:1px solid var(--border)}
+    .topbar-brand-mark{font-size:17px;line-height:1}
+    .topbar-brand-name{font-size:13px;font-weight:700;color:var(--fg);letter-spacing:-.01em}
+    .topbar-nav{display:flex;align-items:center;gap:1px;padding:0 12px}
+    .topbar-nav-item{display:inline-flex;align-items:center;padding:5px 11px;border-radius:var(--radius);font-size:13px;font-weight:500;color:var(--muted-fg);border:1px solid transparent;text-decoration:none;transition:background .12s,color .12s,border-color .12s}
+    .topbar-nav-item:hover{background:var(--muted);color:var(--fg)}
+    .topbar-nav-item.active{background:var(--muted);color:var(--fg);border-color:var(--border)}
+
+    #sidebar{width:240px;border-right:1px solid var(--border);background:var(--sidebar-bg);display:flex;flex-direction:column;height:100%;flex-shrink:0;overflow:hidden}
+    #sidebar-head{padding:10px 12px 9px;border-bottom:1px solid var(--border);display:flex;gap:6px;align-items:center}
+    .sidebar-brand{display:flex;align-items:center;gap:6px;flex:1;min-width:0}
+    .sidebar-brand-mark{font-size:14px;line-height:1;flex-shrink:0}
+    .sidebar-brand-name{font-size:12.5px;font-weight:700;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .sidebar-nav-link{font-size:11px;color:var(--muted-fg);text-decoration:none;padding:4px 8px;border:1px solid transparent;border-radius:var(--radius);font-weight:500;transition:background .1s,color .1s,border-color .1s}
+    .sidebar-nav-link:hover{background:var(--card);border-color:var(--border);color:var(--fg)}
+    .sidebar-nav-link.active{background:var(--fg);color:var(--primary-fg);border-color:var(--fg)}
+    #sidebar-head h2{font-size:12px;margin:0;font-weight:600;color:var(--fg)}
+    #new-btn{padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--fg);color:var(--primary-fg);cursor:pointer;font:inherit;font-size:11.5px;white-space:nowrap;transition:opacity .1s}
+    #new-btn:hover{opacity:.85}
+    #threads{flex:1;overflow-y:auto;padding:4px}
+    .thread{padding:8px 10px;border-radius:var(--radius);cursor:pointer;display:flex;align-items:center;gap:6px;margin-bottom:2px;color:var(--muted-fg);transition:background .1s}
+    .thread:hover{background:hsl(240 5.9% 91%)}
+    .thread.active{background:var(--fg);color:var(--primary-fg)}
+    .thread.active .del{color:hsl(240 5% 65%)}
+    .thread .title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--fg)}
+    .thread.active .title{color:var(--primary-fg)}
+    .thread .del{border:0;background:transparent;color:var(--muted-fg);cursor:pointer;font-size:14px;padding:0 4px;visibility:hidden;border-radius:3px;transition:background .1s}
+    .thread:hover .del{visibility:visible}
+    .thread.active .del:hover{color:var(--primary-fg);background:hsla(0 0% 100% / .15)}
+    #main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+    .chat-header{padding:14px 20px 10px;border-bottom:1px solid var(--border);flex-shrink:0}
+    .chat-header h1{font-size:16px;font-weight:700;margin:0 0 2px;letter-spacing:-.02em}
+    .chat-sub{color:var(--muted-fg);font-size:11.5px}
+    .chat-sub code{font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:11px;background:var(--muted);border:1px solid var(--border);padding:1px 5px;border-radius:4px}
+    #log{flex:1;border:0;border-top:1px solid var(--border);padding:14px 20px;overflow-y:auto;background:var(--bg)}
+    .msg{margin:0 0 12px;white-space:pre-wrap;word-wrap:break-word;font-size:12.5px;line-height:1.6}
+    .user{color:var(--green-fg);font-weight:500}
+    .bot{color:var(--fg)}
+    .tool{color:var(--muted-fg);font-family:'Geist Mono',ui-monospace,Menlo,monospace;font-size:11px;background:var(--muted);border:1px solid var(--border);border-left:3px solid var(--border);padding:5px 8px;margin:3px 0;border-radius:var(--radius)}
+    .err{color:var(--red-fg)}
+    .chat-input-wrap{display:flex;gap:8px;padding:10px 16px 14px;border-top:1px solid var(--border);flex-shrink:0;background:var(--bg)}
+    input[type=text]{flex:1;padding:9px 12px;border:1px solid var(--border);border-radius:var(--radius);font:inherit;font-size:12.5px;background:var(--card);color:var(--fg);transition:border-color .1s}
+    input[type=text]:focus{border-color:hsl(240 5% 65%);outline:none}
+    input[type=text]::placeholder{color:hsl(240 5% 70%)}
+    button[type=submit]{padding:9px 16px;border:1px solid var(--fg);border-radius:var(--radius);background:var(--fg);color:var(--primary-fg);cursor:pointer;font:inherit;font-size:12.5px;font-weight:500;white-space:nowrap;transition:opacity .1s}
+    button[type=submit]:hover{opacity:.85}
+    button[type=submit]:disabled{opacity:.5;cursor:wait}
+    .hint{color:var(--muted-fg);font-size:11.5px;padding:0 16px 10px;line-height:1.5;flex-shrink:0}
+    .empty{color:var(--muted-fg);font-size:12px;text-align:center;padding:16px;font-style:italic}
+    #sidebar-foot{padding:8px 10px;border-top:1px solid var(--border)}
+    #logout-form{margin:0}
+    #logout-btn{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--muted-fg);cursor:pointer;font:inherit;font-size:12px;transition:background .1s}
+    #logout-btn:hover{background:var(--muted)}
+
+  </style></head>
 <body>
+<header id="topbar" role="banner">
+  <div class="topbar-brand">
+    <span class="topbar-brand-mark" aria-hidden="true">🚄</span>
+    <span class="topbar-brand-name">shin-pr-review-agent</span>
+  </div>
+  <nav class="topbar-nav" aria-label="Main navigation">
+    <a href="/dashboard" class="topbar-nav-item">Dashboard</a>
+    <a href="/runs" class="topbar-nav-item">Runs</a>
+    <a href="/chat" class="topbar-nav-item active" aria-current="page">Chat</a>
+  </nav>
+</header>
+<div class="app-body">
 <aside id="sidebar">
   <div id="sidebar-head">
-    <h2>Chats</h2>
-    <a href="/runs" style="font-size:12px;color:#06c;text-decoration:none;padding:4px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;margin-right:6px">Runs</a>
+    <h2 style="font-size:12px;font-weight:700;margin:0;flex:1;color:var(--fg)">Chats</h2>
     <button id="new-btn" type="button">+ New</button>
   </div>
   <div id="threads"></div>
@@ -51,15 +114,17 @@
     </form>
   </div>
 </aside>
-<main id="main">
-  <h1>litellm-bot dev chat</h1>
-  <div class="sub">Sends to <code>POST /chat/api</code> → same agent the Slack handler uses.</div>
-  <div id="log"></div>
-  <form id="f">
-    <input id="m" type="text" placeholder="Triage this PR: https://github.com/BerriAI/litellm/pull/123" autofocus>
+<main id="main" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+  <header class="chat-header">
+    <h1>Dev Chat</h1>
+    <div class="chat-sub">Sends to <code>POST /chat/api</code> — same agent the Slack handler uses.</div>
+  </header>
+  <div id="log" role="log" aria-live="polite" aria-label="Chat messages"></div>
+  <form id="f" class="chat-input-wrap">
+    <input id="m" type="text" placeholder="Triage this PR: https://github.com/BerriAI/litellm/pull/123…" autofocus autocomplete="off" spellcheck="false" aria-label="Chat message">
     <button id="b" type="submit">Send</button>
   </form>
-  <div class="hint">Tool calls show inline. First request can take 30–60s while the gather script hits GitHub. You can click + New or switch threads while a request is in flight — the response will land in its origin thread.</div>
+  <p class="hint">Tool calls show inline. First request can take 30–60&thinsp;s. You can switch threads while a request is in flight — the response will land in its origin thread.</p>
 </main>
 <script>
 const log = document.getElementById('log');
@@ -389,4 +454,5 @@ form.addEventListener('submit', async (e) => {
   }
 })();
 </script>
+</div>
 </body></html>

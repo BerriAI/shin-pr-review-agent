@@ -18,9 +18,9 @@ when `POST_COMMENTS=true`, the agent posts its review directly as a GitHub PR co
 
 ## How it works
 
-Two Python scripts gather context before the agent runs. No `GITHUB_TOKEN` needed — all GitHub API calls go through the LiteLLM MCP proxy.
+Two TypeScript scripts gather context before the agent runs. No `GITHUB_TOKEN` needed — all GitHub API calls go through the LiteLLM MCP proxy.
 
-**Triage pass** (`scripts/gather_pr_triage_data.py`)
+**Triage pass** (`scripts/gather_pr_triage_data.ts`)
 
 Fetches PR metadata and the per-file diff, then resolves all CI check runs (GitHub Actions + CircleCI + classic status API). For each failing check it pulls:
 
@@ -30,7 +30,7 @@ Fetches PR metadata and the per-file diff, then resolves all CI check runs (GitH
 
 Also extracts the [Greptile](https://greptile.com) confidence score from PR comments if present.
 
-**Pattern pass** (`scripts/gather_pattern_local.py`)
+**Pattern pass** (`scripts/gather_pattern_local.ts`)
 
 Uses a local git clone — one `git fetch`, no API rate limits. Diffs the PR against `main`, then for each changed file:
 
@@ -41,6 +41,47 @@ Uses a local git clone — one `git fetch`, no API rate limits. Diffs the PR aga
 Then runs conflict detection: compares how the docs and the sibling code handle the same patterns (e.g. `verbose_logger` vs `logging.getLogger`, `httpx.AsyncClient` vs `litellm.module_level_aclient`). Mismatches are surfaced as explicit conflict hints.
 
 The agent gets both JSON blobs and produces a structured review.
+
+## Merge verdict rubric
+
+Every PR is scored on a 5-point scale. Starting from a base of **5/5**, each fired rule docks points. Final score determines the verdict:
+
+| Score | Verdict | Effect |
+|-------|---------|--------|
+| 5/5 | **READY** | Auto-merged to the staging branch |
+| 1–4/5 | **BLOCKED** | Not merged; author notified by bot comment with reasons |
+| any | **WAITING** | CI checks still running; bot re-reviews on completion |
+
+### Scoring rules
+
+| Rule | Points docked | Fires when |
+|------|--------------|------------|
+| `merge_conflicts` | 5 | PR has merge conflicts against the base branch |
+| `karpathy` (block) | 5 | Karpathy flags a production or correctness risk it can cite from the diff |
+| `pr_related_failures` | 2 | CI failures are specific to this PR (not pre-existing flakiness) |
+| `pattern_blocker` | 2 | Pattern pass finds a `blocker`-severity doc violation |
+| `pattern_high_risk` | 2 | Pattern pass finds a `high`-risk finding |
+| `scope_drift` | 2 | Diff is out of scope relative to the linked issue |
+| `unresolved_blocker` | 2 | A prior reviewer comment marked `blocker` is unresolved |
+| `karpathy` (needs_human) | 2 | Karpathy cannot resolve the PR on model verdict alone (see below) |
+| `pattern_medium_risk` | 1 | Pattern pass finds a `medium`-risk finding |
+| `unresolved_concern` | 1 | A prior reviewer comment marked `concern` is unresolved |
+| `wide_low_density_fanout` | 1 | PR touches ≥30 files with fewer than 5 lines changed per file on average |
+| `greptile_low` | 1 | Greptile confidence score is below 4/5 |
+| `greptile_null` | 1 | Greptile has not reviewed the PR yet |
+
+Score is floored at 0. WAITING takes precedence: if any CI check is still running, verdict is always WAITING regardless of score.
+
+### When a PR is flagged for human review
+
+The `karpathy` check returns `needs_human` (-2 pts, verdict = BLOCKED) when it detects judgment calls that model-only scoring cannot resolve confidently:
+
+- **Scope-claim gap**: PR body claims broader coverage than the diff implements (e.g. "all streams", "every endpoint", "cross-provider") but only a subset is actually changed.
+- **Multi-route claim, single-route tests**: PR asserts multi-endpoint support but every test fixture hardcodes one route, and cross-endpoint risk is detectable in the diff.
+
+To resolve: either expand the implementation to match the claim, or narrow the PR description to match what the diff actually covers. Push a new commit and the bot re-reviews automatically.
+
+> **Note:** This bot is still in beta and might not always work as expected. Please share any feedback via [Slack](https://join.slack.com/t/litellmossslack/shared_invite/zt-3o7nkuyfr-p_kbNJj8taRfXGgQI1~YyA).
 
 ## Setup
 

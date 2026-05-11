@@ -1,0 +1,306 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Dashboard — shin-pr-review-agent</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{font:14px/1.5 -apple-system,system-ui,sans-serif;color:#222;background:#fafafa;min-height:100vh}
+
+  /* Top nav */
+  #topbar{display:flex;align-items:center;gap:12px;padding:10px 24px;border-bottom:1px solid #e0e0e3;background:#fff;position:sticky;top:0;z-index:10}
+  #topbar h1{font-size:14px;font-weight:700;margin:0;color:#222;letter-spacing:-.01em}
+  #topbar .nav-links{display:flex;gap:6px;margin-left:auto}
+  .nav-link{font-size:12px;color:#555;text-decoration:none;padding:4px 10px;border:1px solid #ddd;border-radius:4px;background:#fff}
+  .nav-link:hover{background:#f0f0f7;color:#222}
+  .nav-link.active{background:#222;color:#fff;border-color:#222}
+  #refresh-btn{font-size:12px;padding:4px 10px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer;color:#444;font:inherit}
+  #refresh-btn:hover{background:#f0f0f7}
+  #last-updated{font-size:11px;color:#aaa}
+
+  /* Layout */
+  #page{max-width:1100px;margin:0 auto;padding:28px 24px 60px}
+
+  /* Section header */
+  .section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#999;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+  .section-title::after{content:'';flex:1;height:1px;background:#e8e8eb}
+
+  /* Stat cards row */
+  .stat-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:28px}
+  @media(max-width:800px){.stat-row{grid-template-columns:repeat(2,1fr)}}
+  .stat-card{background:#fff;border:1px solid #e0e0e3;border-radius:8px;padding:16px 18px}
+  .stat-card .label{font-size:11px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+  .stat-card .value{font-size:28px;font-weight:700;line-height:1;color:#222}
+  .stat-card .sub{font-size:12px;color:#aaa;margin-top:4px}
+  .stat-card .delta{font-size:12px;font-weight:600;margin-top:4px}
+  .delta-up{color:#0a5}
+  .delta-dn{color:#c00}
+  .delta-flat{color:#aaa}
+  .stat-card.highlight{border-color:#222;background:#fafafa}
+  .stat-card.highlight .value{color:#222}
+
+  /* Two-col layout */
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:28px}
+  @media(max-width:900px){.two-col{grid-template-columns:1fr}}
+
+  /* Chart card */
+  .card{background:#fff;border:1px solid #e0e0e3;border-radius:8px;padding:18px 20px}
+  .card-title{font-size:12px;font-weight:700;color:#333;margin:0 0 14px;display:flex;align-items:center;gap:8px}
+  .card-title .badge{font-size:10px;padding:2px 7px;border-radius:10px;font-weight:600}
+  .badge-staging{background:#e8e0ff;color:#63a}
+  .badge-internal{background:#d4f4dd;color:#0a5}
+  .badge-total{background:#e8f0ff;color:#06c}
+
+  /* Bar chart */
+  .bar-chart{display:flex;align-items:flex-end;gap:6px;height:80px}
+  .bar-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px}
+  .bar-wrap{flex:1;width:100%;display:flex;flex-direction:column;justify-content:flex-end}
+  .bar{width:100%;border-radius:3px 3px 0 0;min-height:2px;transition:opacity .15s}
+  .bar:hover{opacity:.75;cursor:default}
+  .bar-staging{background:#a78bfa}
+  .bar-internal{background:#34d399}
+  .bar-day{font-size:10px;color:#bbb;text-align:center;flex-shrink:0}
+  .bar-val{font-size:10px;font-weight:600;color:#888;text-align:center;min-height:14px}
+  .chart-legend{display:flex;gap:14px;margin-top:10px}
+  .legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:#666}
+  .legend-dot{width:8px;height:8px;border-radius:2px;flex-shrink:0}
+  .legend-staging{background:#a78bfa}
+  .legend-internal{background:#34d399}
+
+  /* Stacked bar variant */
+  .bar-stacked{display:flex;flex-direction:column;width:100%;border-radius:3px 3px 0 0;overflow:hidden;min-height:2px}
+  .bar-stacked .bar{border-radius:0;width:100%}
+
+  /* PR table */
+  .pr-table{width:100%;border-collapse:collapse;font-size:12.5px}
+  .pr-table th{text-align:left;padding:6px 10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#aaa;border-bottom:1px solid #eee}
+  .pr-table td{padding:8px 10px;border-bottom:1px solid #f5f5f5;vertical-align:top}
+  .pr-table tr:last-child td{border-bottom:0}
+  .pr-table tr:hover td{background:#fafafe}
+  .pr-num{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#06c;text-decoration:none}
+  .pr-num:hover{text-decoration:underline}
+  .pr-title-cell{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#222;font-size:12.5px}
+  .pr-author{font-size:11px;color:#888}
+  .pr-time{font-size:11px;color:#bbb;white-space:nowrap}
+  .tag{font-size:10px;padding:2px 6px;border-radius:3px;font-weight:600;white-space:nowrap}
+  .tag-staging{background:#e8e0ff;color:#63a}
+  .tag-internal{background:#d4f4dd;color:#0a5}
+  .tag-reverted{background:#fde0e0;color:#c00;text-decoration:line-through}
+
+  /* Ratio bar */
+  .ratio-bar-wrap{margin-top:10px}
+  .ratio-label{display:flex;justify-content:space-between;font-size:11px;color:#888;margin-bottom:4px}
+  .ratio-bar-bg{background:#eee;border-radius:4px;height:8px;overflow:hidden}
+  .ratio-bar-fill{height:100%;background:linear-gradient(90deg,#a78bfa,#34d399);border-radius:4px;transition:width .4s ease}
+
+  /* Empty */
+  .empty{color:#bbb;font-size:13px;text-align:center;padding:24px;font-style:italic}
+</style>
+</head><body>
+
+<div id="topbar">
+  <h1>shin-pr-review-agent</h1>
+  <div class="nav-links">
+    <a class="nav-link active" href="/dashboard">Dashboard</a>
+    <a class="nav-link" href="/runs">Runs</a>
+    <a class="nav-link" href="/chat">Chat</a>
+  </div>
+  <button id="refresh-btn" onclick="location.reload()">Refresh</button>
+  <span id="last-updated">Updated just now</span>
+</div>
+
+<div id="page">
+
+  <!-- TODAY STATS -->
+  <div class="section-title">Today</div>
+  <div class="stat-row" id="today-stats">
+    <div class="stat-card highlight">
+      <div class="label">Merged → staging</div>
+      <div class="value" id="today-staging">—</div>
+      <div class="sub">individual PRs today</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Staging → internal</div>
+      <div class="value" id="today-internal">—</div>
+      <div class="sub">staging PRs merged to main</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Reverted today</div>
+      <div class="value" id="today-reverted">—</div>
+      <div class="sub">staging merges reverted</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Daily cap</div>
+      <div class="value" id="today-cap">—</div>
+      <div class="sub" id="cap-sub">of 10 slots used</div>
+    </div>
+  </div>
+
+  <!-- 7-DAY CHARTS -->
+  <div class="section-title">Last 7 days</div>
+  <div class="two-col">
+
+    <div class="card">
+      <div class="card-title">
+        Merges per day
+        <span class="badge badge-staging">→ staging</span>
+        <span class="badge badge-internal">→ internal</span>
+      </div>
+      <div class="bar-chart" id="bar-chart"></div>
+      <div class="chart-legend">
+        <span class="legend-item"><span class="legend-dot legend-staging"></span>→ staging branch</span>
+        <span class="legend-item"><span class="legend-dot legend-internal"></span>staging → internal</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">7-day totals <span class="badge badge-total">7d</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
+        <div>
+          <div style="font-size:11px;color:#888;margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">→ Staging</div>
+          <div style="font-size:32px;font-weight:700;color:#222" id="week-staging">—</div>
+          <div style="font-size:11px;color:#aaa" id="week-staging-sub">PRs merged</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:#888;margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">→ Internal</div>
+          <div style="font-size:32px;font-weight:700;color:#222" id="week-internal">—</div>
+          <div style="font-size:11px;color:#aaa" id="week-internal-sub">staging PRs merged</div>
+        </div>
+      </div>
+      <div class="ratio-bar-wrap">
+        <div class="ratio-label">
+          <span id="ratio-left">staging</span>
+          <span id="ratio-right">internal</span>
+        </div>
+        <div class="ratio-bar-bg">
+          <div class="ratio-bar-fill" id="ratio-bar" style="width:50%"></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- RECENT MERGES TABLE -->
+  <div class="section-title">Recent merges</div>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table class="pr-table" id="recent-table">
+      <thead>
+        <tr>
+          <th>PR</th>
+          <th>Title</th>
+          <th>Author</th>
+          <th>Type</th>
+          <th>Merged</th>
+        </tr>
+      </thead>
+      <tbody id="recent-tbody">
+        <tr><td colspan="5" class="empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Mock data — replace fetch() calls with /api/v1/dashboard when endpoint lands
+// ---------------------------------------------------------------------------
+
+const MOCK = {
+  today: {
+    staging: 4,
+    internal: 1,
+    reverted: 0,
+    cap_used: 4,
+    cap_total: 10,
+  },
+  week: [
+    { date: "05-05", staging: 2, internal: 0 },
+    { date: "05-06", staging: 7, internal: 1 },
+    { date: "05-07", staging: 5, internal: 2 },
+    { date: "05-08", staging: 3, internal: 1 },
+    { date: "05-09", staging: 0, internal: 0 },
+    { date: "05-10", staging: 6, internal: 1 },
+    { date: "05-11", staging: 4, internal: 1 }, // today
+  ],
+  recent: [
+    { pr: 25810, title: "fix(proxy): handle timeout in LLM call correctly", author: "dev-user", type: "staging", merged_at: Date.now() - 12*60000 },
+    { pr: 25803, title: "feat(router): add retry backoff for rate-limited models", author: "contributor42", type: "staging", merged_at: Date.now() - 45*60000 },
+    { pr: 25799, title: "feat(guardrails): add prompt injection detection layer", author: "sec-bot", type: "staging", merged_at: Date.now() - 90*60000 },
+    { pr: 25791, title: "chore(deps): bump litellm to 1.35.2", author: "depbot", type: "internal", merged_at: Date.now() - 3*3600000 },
+    { pr: 25788, title: "fix(anthropic): correct token count for claude-3-5", author: "krrish", type: "staging", merged_at: Date.now() - 5*3600000 },
+    { pr: 25772, title: "feat(responses): wire /v1/responses to Bedrock models", author: "another-dev", type: "staging", merged_at: Date.now() - 28*3600000 },
+    { pr: 25760, title: "fix(streaming): handle CancelledError on mid-stream disconnect", author: "upstream-contrib", type: "reverted", merged_at: Date.now() - 30*3600000 },
+  ],
+};
+
+function relTime(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+  return `${Math.floor(s/86400)}d ago`;
+}
+
+function render(data) {
+  // Today cards
+  document.getElementById("today-staging").textContent = data.today.staging;
+  document.getElementById("today-internal").textContent = data.today.internal;
+  document.getElementById("today-reverted").textContent = data.today.reverted;
+  document.getElementById("today-cap").textContent = `${data.today.cap_used}/${data.today.cap_total}`;
+  document.getElementById("cap-sub").textContent = `of ${data.today.cap_total} daily slots used`;
+
+  // Bar chart
+  const maxVal = Math.max(...data.week.map(d => d.staging + d.internal), 1);
+  const chartEl = document.getElementById("bar-chart");
+  chartEl.innerHTML = "";
+  data.week.forEach(d => {
+    const totalH = Math.round(((d.staging + d.internal) / maxVal) * 72);
+    const sH = d.staging + d.internal > 0 ? Math.round((d.staging / (d.staging + d.internal)) * totalH) : 0;
+    const iH = totalH - sH;
+    const col = document.createElement("div");
+    col.className = "bar-col";
+    col.innerHTML = `
+      <div class="bar-val">${d.staging + d.internal || ""}</div>
+      <div class="bar-wrap">
+        <div style="display:flex;flex-direction:column;width:100%;justify-content:flex-end;height:72px">
+          <div class="bar bar-staging" style="height:${sH}px" title="→ staging: ${d.staging}"></div>
+          <div class="bar bar-internal" style="height:${iH}px;border-radius:0" title="→ internal: ${d.internal}"></div>
+        </div>
+      </div>
+      <div class="bar-day">${d.date}</div>`;
+    chartEl.appendChild(col);
+  });
+
+  // 7d totals
+  const wStaging = data.week.reduce((a,d) => a + d.staging, 0);
+  const wInternal = data.week.reduce((a,d) => a + d.internal, 0);
+  document.getElementById("week-staging").textContent = wStaging;
+  document.getElementById("week-internal").textContent = wInternal;
+  document.getElementById("week-staging-sub").textContent = "PRs merged this week";
+  document.getElementById("week-internal-sub").textContent = "staging PRs merged this week";
+
+  // Ratio bar
+  const total = wStaging + wInternal;
+  const pct = total > 0 ? Math.round((wStaging / total) * 100) : 50;
+  document.getElementById("ratio-bar").style.width = `${pct}%`;
+  document.getElementById("ratio-left").textContent = `staging (${wStaging})`;
+  document.getElementById("ratio-right").textContent = `internal (${wInternal})`;
+
+  // Recent table
+  const tbody = document.getElementById("recent-tbody");
+  tbody.innerHTML = data.recent.map(pr => `
+    <tr>
+      <td><a class="pr-num" href="https://github.com/BerriAI/litellm/pull/${pr.pr}" target="_blank">#${pr.pr}</a></td>
+      <td><span class="pr-title-cell" title="${pr.title}">${pr.title}</span></td>
+      <td><span class="pr-author">${pr.author}</span></td>
+      <td><span class="tag tag-${pr.type}">${pr.type === "staging" ? "→ staging" : pr.type === "internal" ? "→ internal" : "reverted"}</span></td>
+      <td><span class="pr-time">${relTime(pr.merged_at)}</span></td>
+    </tr>`).join("");
+
+  document.getElementById("last-updated").textContent = `Updated ${relTime(Date.now() - 1000)}`;
+}
+
+// Swap for real fetch:
+// fetch("/api/v1/dashboard").then(r => r.json()).then(render);
+render(MOCK);
+</script>
+</body></html>

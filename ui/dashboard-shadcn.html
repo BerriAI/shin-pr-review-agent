@@ -435,6 +435,18 @@
 
     .empty-state { padding: 40px 16px; text-align: center; color: var(--muted-foreground); font-size: 0.8125rem }
 
+    /* ── PR search ── */
+    .pr-search-wrap { padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--card) }
+    .pr-search-input {
+      width: 100%; padding: 6px 10px 6px 30px;
+      border: 1px solid var(--border); border-radius: var(--radius);
+      font: inherit; font-size: 0.8125rem;
+      background: var(--secondary) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none'%3E%3Ccircle cx='6.5' cy='6.5' r='5' stroke='%23999' stroke-width='1.5'/%3E%3Cpath d='M10 10l3 3' stroke='%23999' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat 9px center;
+      color: var(--foreground);
+    }
+    .pr-search-input:focus { border-color: hsl(240 5% 65%); background-color: var(--card); outline: none }
+    .pr-search-input::placeholder { color: var(--muted-foreground) }
+
     /* ── PR tabs ── */
     .pr-tabs { display: flex; align-items: center; border-bottom: 1px solid var(--border); background: var(--secondary); padding: 0 4px; gap: 0 }
     .pr-tab {
@@ -608,6 +620,10 @@
       <button class="pr-tab"        role="tab" aria-selected="false" aria-controls="pane-staging"  id="tab-staging"  type="button">Staging PRs     <span class="tab-count" id="staging-count">—</span></button>
       <button class="pr-tab"        role="tab" aria-selected="false" aria-controls="pane-amerged"  id="tab-amerged"  type="button">Auto-merged     <span class="tab-count" id="auto-merged-count">—</span></button>
       <button id="staging-refresh" class="tab-action" type="button" style="display:none" aria-label="Refresh staging PRs">↺</button>
+    </div>
+
+    <div class="pr-search-wrap">
+      <input class="pr-search-input" id="pr-table-search" type="search" placeholder="Search PR # or title…" autocomplete="off" spellcheck="false" aria-label="Search pull requests">
     </div>
 
     <div id="pane-recent" role="tabpanel" aria-labelledby="tab-recent">
@@ -920,6 +936,46 @@ async function handleAutoMergedRevert(e) {
 
 document.getElementById('auto-merged-list').addEventListener('click', handleAutoMergedRevert);
 document.getElementById('staging-refresh').addEventListener('click', loadStagingPrs);
+
+// ── PR table search ──────────────────────────────────────────────────────────
+let _dashSearchQuery = '';
+let _activePrTab = 'tab-recent';
+
+document.getElementById('pr-table-search').addEventListener('input', e => {
+  _dashSearchQuery = e.target.value.trim().toLowerCase();
+  applyDashSearch();
+});
+
+function applyDashSearch() {
+  const q = _dashSearchQuery;
+  if (_activePrTab === 'tab-recent') {
+    const rows = document.querySelectorAll('#recent-tbody tr');
+    rows.forEach(row => {
+      if (!q) { row.style.display = ''; return; }
+      const text = row.textContent.toLowerCase();
+      row.style.display = text.includes(q) ? '' : 'none';
+    });
+  } else if (_activePrTab === 'tab-staging') {
+    document.querySelectorAll('#staging-prs-list .staging-row, #staging-prs-list a').forEach(row => {
+      row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? '' : 'none';
+    });
+  } else if (_activePrTab === 'tab-amerged') {
+    document.querySelectorAll('#auto-merged-list .auto-merged-row').forEach(row => {
+      row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? '' : 'none';
+    });
+  }
+}
+
+// Hook tab switching to reset search and re-apply
+const _origSwitchPrTab = switchPrTab;
+// Patch: clear search on tab change and track active tab
+PR_TABS.forEach(({ tab }) => {
+  document.getElementById(tab).addEventListener('click', () => {
+    _activePrTab = tab;
+    _dashSearchQuery = '';
+    document.getElementById('pr-table-search').value = '';
+  });
+});
 
 </script>
 </body>

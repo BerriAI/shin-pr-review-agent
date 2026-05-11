@@ -79,6 +79,10 @@
     .filter-tab.active{color:var(--fg);border-bottom-color:var(--fg);background:var(--sidebar-bg)}
 
     /* ── Run list ── */
+    #search-wrap{padding:6px 10px;border-bottom:1px solid var(--border);background:var(--sidebar-bg);flex-shrink:0}
+    #pr-search{width:100%;padding:6px 10px 6px 30px;border:1px solid var(--border);border-radius:var(--radius);font:inherit;font-size:12px;background:var(--card);color:var(--fg);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none'%3E%3Ccircle cx='6.5' cy='6.5' r='5' stroke='%23999' stroke-width='1.5'/%3E%3Cpath d='M10 10l3 3' stroke='%23999' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:9px center}
+    #pr-search:focus{border-color:hsl(240 5% 65%);outline:none}
+    #pr-search::placeholder{color:hsl(240 5% 70%)}
     #runs-list,#staging-prs-list,#auto-merged-list{flex:1;overflow-y:auto}
     .run-row{padding:10px 14px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;flex-direction:column;gap:4px;transition:background .1s}
     .run-row:hover{background:hsl(240 5.9% 93%)}
@@ -302,6 +306,9 @@
     <button class="view-tab active" data-view="runs" type="button">Runs</button>
     <button class="view-tab" data-view="agent" type="button">Agent</button>
   </div>
+  <div id="search-wrap">
+    <input id="pr-search" type="search" placeholder="Search PR # or title…" autocomplete="off" spellcheck="false" aria-label="Search runs">
+  </div>
   <div id="filter-tabs">
     <button class="filter-tab active" data-filter="all" type="button">All</button>
     <button class="filter-tab" data-filter="ready" type="button">✓ Ready</button>
@@ -321,11 +328,19 @@ const emptyDetailEl = document.getElementById('empty-detail');
 let activeRunId = null;
 let runs = [];
 let activeFilter = 'all';
+let searchQuery = '';
 
 function filteredRuns(){
-  if (activeFilter === 'ready') return runs.filter(r => (r.verdict || '').toUpperCase() === 'READY');
-  if (activeFilter === 'blocked') return runs.filter(r => (r.verdict || '').toUpperCase() !== 'READY');
-  return runs;
+  let base = runs;
+  if (activeFilter === 'ready') base = base.filter(r => (r.verdict || '').toUpperCase() === 'READY');
+  else if (activeFilter === 'blocked') base = base.filter(r => (r.verdict || '').toUpperCase() !== 'READY');
+  if (!searchQuery) return base;
+  const q = searchQuery.toLowerCase();
+  return base.filter(r =>
+    String(r.pr_number).includes(q) ||
+    (r.pr_title || '').toLowerCase().includes(q) ||
+    (r.pr_author || '').toLowerCase().includes(q)
+  );
 }
 
 async function authFetch(url, opts){
@@ -1645,6 +1660,11 @@ async function handleAutoMergedRevert(e) {
 }
 
 // --- Filter tabs --------------------------------------------------------------
+document.getElementById('pr-search').addEventListener('input', e => {
+  searchQuery = e.target.value.trim();
+  renderRunsList();
+});
+
 for (const tab of document.querySelectorAll('.filter-tab')) {
   tab.addEventListener('click', () => {
     activeFilter = tab.dataset.filter;

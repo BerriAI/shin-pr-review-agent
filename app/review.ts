@@ -1825,10 +1825,17 @@ async function _triageLlmCall(
 // from `g`; the model-classified fields (pr_related_failures vs unrelated,
 // failure_rationales, prior_signals, scope_drift) are zeroed and a one-line
 // summary explains the LLM step was skipped.
+//
+// When `gateBlockReason` is provided (a gate fired and blocked the LLM), it
+// is injected into `pr_related_failures` so `fuse` produces a BLOCKED verdict
+// (-2 penalty → score ≤ 3) and Karpathy is correctly skipped. Without this
+// injection the fallback report has all-zero rubric fields, fuse gives score=5
+// (READY), and Karpathy runs needlessly for several minutes.
 function _triageReportFromGather(
   prUrl: string,
   g: Record<string, unknown>,
   reason: string,
+  gateBlockReason?: string,
 ): TriageReport {
   const diffFiles = (g.diff_files as any[] | undefined) ?? [];
   const filesChanged = diffFiles.length;
@@ -1861,7 +1868,7 @@ function _triageReportFromGather(
   // Build a short, user-readable summary describing the diff size + what fell
   // through. The verbose `reason` string (often a Zod error blob) goes only to
   // the debug log, never the user-facing card.
-  dbg(`_triageReportFromGather: building fallback (reason=${reason})`);
+  dbg(`_triageReportFromGather: building fallback (reason=${reason} gateBlockReason=${gateBlockReason ?? "none"})`);
   const sizeLine = `${additions + deletions} line(s) across ${filesChanged} file(s) (+${additions}/-${deletions})`;
   const summary =
     `Gathered PR data only — the triage LLM step did not produce a valid ` +
@@ -1869,6 +1876,12 @@ function _triageReportFromGather(
     `were skipped. ${sizeLine}.`;
   // Defensive cap; sizeLine is short but keep us under the 600 schema bound.
   const pr_summary = summary.length > 600 ? summary.slice(0, 597) + "…" : summary;
+  // When a gate blocked the LLM call, inject the gate reason as a synthetic
+  // pr_related_failures entry. This causes fuse() to apply a -2 penalty
+  // (score ≤ 3 → verdict=BLOCKED) so Karpathy is correctly skipped.
+  // Without this, fuse sees all-zero rubric fields and returns score=5/READY,
+  // triggering an unnecessary ~5-minute Karpathy run.
+  const syntheticFailures = gateBlockReason ? [gateBlockReason] : [];
   return TriageReportSchema.parse({
     pr_number: prNum,
     pr_title: (g.pr_title as string | undefined) ?? prUrl,
@@ -1882,6 +1895,7 @@ function _triageReportFromGather(
     has_circleci_checks: hasCircleCi,
     has_merge_conflicts: hasMergeConflicts,
     running_checks: inProgress,
+    pr_related_failures: syntheticFailures,
   });
 }
 
@@ -1947,6 +1961,12 @@ export async function reviewPr(
   await Promise.all([
     (async () => {
       const triageT0 = Date.now();
+      // Hoisted outside the try block so the catch path can call
+      // _triageReportFromGather when the LLM step throws (e.g. context-limit
+      // 413 on large PRs). Without hoisting, gatherData is out of scope in
+      // the catch and we fall through to renderFallbackCard — which loses the
+      // PR title / author / size info that gatherData carries.
+      let gatherData: Record<string, unknown> | null = null;
       try {
         log("triage: running gather");
         // Mint a short-lived installation token for the PR's owner so the
@@ -1970,7 +1990,7 @@ export async function reviewPr(
           );
         }
         const gatherT0 = Date.now();
-        const gatherData = await _runGatherLocal(
+        gatherData = await _runGatherLocal(
           prUrl,
           log,
           GATHER_SCRIPT,
@@ -1996,6 +2016,7 @@ export async function reviewPr(
             prUrl,
             gatherData,
             `gate ${firstBlock.category}: ${firstBlock.reason}`,
+            firstBlock.reason, // inject into pr_related_failures → fuse scores BLOCKED
           );
           triageTrace = [
             {
@@ -2115,9 +2136,31 @@ export async function reviewPr(
           log("triage: done (no JSON; using gather fallback)");
         }
       } catch (e) {
-        triageErr = String(e);
+        // Log prominently — context-limit / network errors on large PRs reach
+        // here and were previously silently swallowed, producing output: "".
+        const errStr = String(e);
+        console.error(
+          `[triage] LLM/gather error for ${prUrl} after ${Date.now() - triageT0}ms:`,
+          e,
+        );
         dbg(`reviewPr.triage: ERROR after ${Date.now() - triageT0}ms`, e);
-        log(`triage: ERROR — ${e}`);
+        log(`triage: ERROR — ${errStr}`);
+        if (gatherData) {
+          // Gather succeeded but the LLM step threw (e.g. 413 context-limit on
+          // a large PR). Fall back to the deterministic gather-based report so
+          // triage is non-null and the card still carries PR title / author /
+          // size info. Without this, triage stays null and the early-exit branch
+          // calls renderFallbackCard which loses all that context.
+          triage = _triageReportFromGather(
+            prUrl,
+            gatherData,
+            `triage LLM error: ${errStr.slice(0, 200)}`,
+          );
+          log("triage: using gather-only fallback after LLM error");
+        } else {
+          // Gather itself failed — nothing to build from; let !triage guard fire.
+          triageErr = errStr;
+        }
       }
     })(),
     // Pattern review — scoped out of the v0 deploy. Re-enable by un-commenting.
@@ -2737,7 +2780,15 @@ async function runChatTurn(
   const fullMessage = reviewBlocks.length
     ? `${reviewBlocks.join("\n\n")}\n\n---\nUser message:\n${message}`
     : message;
-  const { output, toolTrace } = await runPrompt(thread.agent!, fullMessage, onStream);
+  const { output: rawOutput, toolTrace } = await runPrompt(thread.agent!, fullMessage, onStream);
+  // If the Cursor chat agent returned empty text (e.g. it hit an error or the
+  // context was too large) but we have review content, surface the review
+  // directly so the API response is never an empty string. This prevents
+  // the "/chat/api output: ''" symptom when triage falls back to gather-only.
+  const output =
+    rawOutput.trim() === "" && reviewBlocks.length > 0
+      ? reviewBlocks.join("\n\n")
+      : rawOutput;
   return { output, toolTrace: [...trace, ...toolTrace] };
 }
 

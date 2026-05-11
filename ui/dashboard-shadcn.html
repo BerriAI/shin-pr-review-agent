@@ -844,7 +844,8 @@ async function loadStagingPrs() {
       </a>`).join('');
   } catch (err) {
     countEl.textContent = '';
-    listEl.innerHTML = '<div class="section-error">' + escapeHtml(String(err)) + '</div>';
+    const msg = window.location.protocol === 'file:' ? 'Not connected to server — open via /dashboard' : escapeHtml(String(err));
+    listEl.innerHTML = '<div class="section-error">' + msg + '</div>';
   }
 }
 
@@ -890,7 +891,8 @@ async function loadAutoMerges() {
     }
     listEl.innerHTML = html;
   } catch (err) {
-    listEl.innerHTML = '<div class="section-error">' + escapeHtml(String(err)) + '</div>';
+    const msg = window.location.protocol === 'file:' ? 'Not connected to server — open via /dashboard' : escapeHtml(String(err));
+    listEl.innerHTML = '<div class="section-error">' + msg + '</div>';
   }
 }
 

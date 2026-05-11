@@ -1031,7 +1031,7 @@ function renderDetail(rec){
         </details>` : ''}
         ${(rec.karpathy_check && Object.keys(rec.karpathy_check).length) ? `
         <details class="json-section">
-          <summary>Karpathy check (full JSON)</summary>
+          <summary>Karpathy check (full JSON)${rec.karpathy_check.cursor_agent_url ? ` · <a href="${escapeHtml(rec.karpathy_check.cursor_agent_url)}" target="_blank" rel="noopener" style="font-weight:400;color:var(--blue-fg)">Open in Cursor ↗</a>` : ''}</summary>
           <div class="json-body"><pre>${escapeHtml(JSON.stringify(rec.karpathy_check, null, 2))}</pre></div>
         </details>` : ''}
         ${renderGatesPanel(rec.gate_results)}

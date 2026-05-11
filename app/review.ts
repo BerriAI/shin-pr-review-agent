@@ -705,10 +705,8 @@ export type KarpathyCheckRecord =
       duration_ms: number;
       attempts: number;
       result: KarpathyReview;
-      // Capped tool-trace from the cursor agent run. Persisted on the
-      // success path so post-mortem can see what tools the agent actually
-      // invoked when explaining a `merge`/`block`/`needs_human` decision.
       tool_trace?: ToolTraceEntry[];
+      cursor_agent_url?: string; // deep-link into the Cursor Cloud agent session
     }
   | {
       status: "errored";
@@ -723,10 +721,8 @@ export type KarpathyCheckRecord =
         stdout_tail?: string;
         last_known_phase?: string;
       };
-      // Capped tool-trace captured before the failure. The error path is
-      // the most valuable post-mortem signal — without the trace, an
-      // `errored` record with kind=cursor_agent_error is unactionable.
       tool_trace?: ToolTraceEntry[];
+      cursor_agent_url?: string; // preserved even on error for post-mortem inspection
     }
   | {
       status: "killed";
@@ -877,8 +873,14 @@ export async function runKarpathyCheck(
   // whatever the agent had completed before the crash — that's the
   // post-mortem signal we'd lose if it lived inside the try block.
   let toolTrace: ToolTraceEntry[] = [];
+  let cursorAgentUrl: string | undefined;
   try {
     const session = await newSession(KARPATHY_SYSTEM);
+    // Capture the Cursor Cloud agent URL for deep-linking from the runs UI.
+    // agentId is available on the session object (CursorAgent = any, but the
+    // underlying SDK class always sets this field after Agent.create()).
+    const agentId: string | undefined = (session as any).agentId;
+    if (agentId) cursorAgentUrl = `https://cursor.com/agents/${agentId}`;
     const { output, toolTrace: rawTrace } = await runPrompt(
       session,
       `Review this PR: ${prUrl}`,
@@ -914,6 +916,7 @@ export async function runKarpathyCheck(
       attempts: 1,
       result: review,
       tool_trace: toolTrace,
+      ...(cursorAgentUrl ? { cursor_agent_url: cursorAgentUrl } : {}),
     };
   } catch (err) {
     const finished_at = Date.now() / 1000;
@@ -930,6 +933,7 @@ export async function runKarpathyCheck(
       finished_at,
       duration_ms: Date.now() - t0,
       attempts: 1,
+      ...(cursorAgentUrl ? { cursor_agent_url: cursorAgentUrl } : {}),
       error: {
         kind: tagged.kind,
         message: tagged.message.slice(0, 1000),

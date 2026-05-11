@@ -26,6 +26,8 @@ import {
   deleteThread,
   createThread,
   ensureChatSession,
+  type FuseTraceEntry,
+  type TriageCard,
 } from "./review.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -625,6 +627,27 @@ async function headCommitDate(
   return date ? new Date(date) : null;
 }
 
+function renderBlockedComment(card: TriageCard, fuseTrace: FuseTraceEntry[]): string {
+  const fired = fuseTrace.filter((e) => e.fired);
+  const bullets = fired
+    .map((e) => `- ${e.label ?? e.rule} (\`${e.rule}\`, -${e.weight} pts)`)
+    .join("\n");
+  return [
+    `🤖 **litellm-agent**: This PR is currently **BLOCKED** from merge.`,
+    ``,
+    `**Score: ${card.score}/5** ❌`,
+    ``,
+    `**Why blocked:**`,
+    bullets || `- (scoring rules fired — see justification below)`,
+    ``,
+    `**Details:** ${card.justification}`,
+    ``,
+    `Fix the issues above and push an update — the bot will re-review automatically.`,
+    ``,
+    `> **Note:** This bot is still in beta and might not always work as expected. Please share any feedback via [Slack](https://join.slack.com/t/litellmossslack/shared_invite/zt-3o7nkuyfr-p_kbNJj8taRfXGgQI1~YyA).`,
+  ].join("\n");
+}
+
 // Shared post-claim review logic used by both issue_comment and check_suite handlers.
 async function runWebhookReview(
   installationId: number,
@@ -677,6 +700,26 @@ async function runWebhookReview(
   if (finalVerdict === "BLOCKED") {
     await db.startBlockedWatch(runId);
     console.log(`[webhook] delivery=${delivery} PR #${prNumber} BLOCKED — started 7-day inactivity watch`);
+
+    const blockedCard = finalRun?.card as TriageCard | null;
+    const blockedTrace = (finalRun?.fuse_trace ?? []) as FuseTraceEntry[];
+    if (blockedCard) {
+      const blockedComment = renderBlockedComment(blockedCard, blockedTrace);
+      await fetch(
+        `https://api.github.com/repos/${repoFullName}/issues/${prNumber}/comments`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ body: blockedComment }),
+        },
+      ).catch((err) => console.warn(`[blocked] comment failed for PR #${prNumber}:`, err));
+      console.log(`[webhook] delivery=${delivery} PR #${prNumber} BLOCKED comment posted`);
+    }
   }
   // READY: auto-merge handled by hook registered in reviewPr (all sources unified).
 }
@@ -905,6 +948,10 @@ app.get("/chat", requireLogin, (_req, res) => {
 
 app.get("/runs", requireLogin, (_req, res) => {
   res.sendFile(join(UI_DIR, "runs.html"));
+});
+
+app.get("/dashboard", requireLogin, (_req, res) => {
+  res.sendFile(join(UI_DIR, "dashboard-shadcn.html"));
 });
 
 app.get("/login", (_req, res) => {

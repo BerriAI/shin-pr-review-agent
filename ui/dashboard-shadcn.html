@@ -434,6 +434,30 @@
     .section-error{color:var(--destructive);font-size:0.8125rem;padding:24px;text-align:center;font-style:italic}
 
     .empty-state { padding: 40px 16px; text-align: center; color: var(--muted-foreground); font-size: 0.8125rem }
+
+    /* ── PR tabs ── */
+    .pr-tabs { display: flex; align-items: center; border-bottom: 1px solid var(--border); background: var(--secondary); padding: 0 4px; gap: 0 }
+    .pr-tab {
+      padding: 10px 14px; border: 0; background: transparent; font: inherit;
+      font-size: 0.8125rem; font-weight: 500; color: var(--muted-foreground);
+      cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
+      display: inline-flex; align-items: center; gap: 6px;
+      transition: color 0.12s;
+    }
+    .pr-tab:hover { color: var(--foreground) }
+    .pr-tab.active { color: var(--foreground); border-bottom-color: var(--foreground); background: var(--card) }
+    .tab-count {
+      font-family: 'Geist Mono', monospace; font-size: 0.6875rem;
+      background: var(--border); color: var(--muted-foreground);
+      padding: 1px 6px; border-radius: 9999px; font-variant-numeric: tabular-nums;
+    }
+    .pr-tab.active .tab-count { background: var(--foreground); color: var(--primary-foreground) }
+    .tab-action {
+      margin-left: auto; padding: 4px 10px; border: 1px solid var(--border);
+      border-radius: var(--radius); background: var(--card); font: inherit;
+      font-size: 0.75rem; color: var(--muted-foreground); cursor: pointer;
+    }
+    .tab-action:hover { background: var(--secondary) }
   </style>
 </head>
 <body>
@@ -572,58 +596,36 @@
     </div>
   </div>
 
-  <!-- RECENT MERGES -->
+  <!-- TABBED TABLE -->
   <div class="section-header">
-    <h2>Recent Merges</h2>
+    <h2>Pull Requests</h2>
     <div class="section-divider" role="presentation"></div>
   </div>
 
-  <div class="table-section" role="region" aria-label="Recent merges table">
-    <div class="table-header">
-      <span class="table-title">Pull Requests</span>
-      <span class="table-count" id="table-count" aria-live="polite">— entries</span>
+  <div class="table-section" role="region" aria-label="Pull requests">
+    <div class="pr-tabs" role="tablist" aria-label="PR views">
+      <button class="pr-tab active" role="tab" aria-selected="true"  aria-controls="pane-recent"   id="tab-recent"   type="button">Recent Merges   <span class="tab-count" id="table-count">—</span></button>
+      <button class="pr-tab"        role="tab" aria-selected="false" aria-controls="pane-staging"  id="tab-staging"  type="button">Staging PRs     <span class="tab-count" id="staging-count">—</span></button>
+      <button class="pr-tab"        role="tab" aria-selected="false" aria-controls="pane-amerged"  id="tab-amerged"  type="button">Auto-merged     <span class="tab-count" id="auto-merged-count">—</span></button>
+      <button id="staging-refresh" class="tab-action" type="button" style="display:none" aria-label="Refresh staging PRs">↺</button>
     </div>
-    <table class="pr-table" aria-label="Recent merged pull requests">
-      <thead>
-        <tr>
-          <th scope="col">#</th>
-          <th scope="col">Title</th>
-          <th scope="col">Author</th>
-          <th scope="col">Type</th>
-          <th scope="col">Merged</th>
-        </tr>
-      </thead>
-      <tbody id="recent-tbody">
-        <tr><td colspan="5" class="empty-state">Loading…</td></tr>
-      </tbody>
-    </table>
-  </div>
 
-  <!-- STAGING PRS -->
-  <div class="section-header" style="margin-top:8px">
-    <h2>Staging PRs</h2>
-    <div class="section-divider" role="presentation"></div>
-    <button id="staging-refresh" style="font-size:11px;padding:3px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--muted-foreground);cursor:pointer;font-family:inherit;margin-left:8px" type="button">↺ Refresh</button>
-  </div>
-  <div class="table-section" role="region" aria-label="Open staging PRs" style="margin-bottom:20px">
-    <div class="table-header">
-      <span class="table-title">Open Staging PRs</span>
-      <span class="table-count" id="staging-count" aria-live="polite">—</span>
+    <div id="pane-recent" role="tabpanel" aria-labelledby="tab-recent">
+      <table class="pr-table" aria-label="Recent merged pull requests">
+        <thead><tr>
+          <th scope="col">#</th><th scope="col">Title</th><th scope="col">Author</th><th scope="col">Type</th><th scope="col">Merged</th>
+        </tr></thead>
+        <tbody id="recent-tbody"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody>
+      </table>
     </div>
-    <div id="staging-prs-list"><div class="empty-state">Loading…</div></div>
-  </div>
 
-  <!-- AUTO-MERGED -->
-  <div class="section-header">
-    <h2>Auto-merged</h2>
-    <div class="section-divider" role="presentation"></div>
-  </div>
-  <div class="table-section" role="region" aria-label="Auto-merged PRs">
-    <div class="table-header">
-      <span class="table-title">Agent-merged PRs</span>
-      <span class="table-count" id="auto-merged-count" aria-live="polite">—</span>
+    <div id="pane-staging" role="tabpanel" aria-labelledby="tab-staging" hidden>
+      <div id="staging-prs-list"><div class="empty-state">Loading…</div></div>
     </div>
-    <div id="auto-merged-list"><div class="empty-state">Loading…</div></div>
+
+    <div id="pane-amerged" role="tabpanel" aria-labelledby="tab-amerged" hidden>
+      <div id="auto-merged-list"><div class="empty-state">Loading…</div></div>
+    </div>
   </div>
 
 </div>
@@ -766,6 +768,30 @@ render(MOCK);
 setInterval(() => {
   setText("ts", new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }));
 }, 30000);
+// ── PR tab switching ─────────────────────────────────────────────────────────
+const PR_TABS = [
+  { tab: 'tab-recent',  pane: 'pane-recent',  refresh: false },
+  { tab: 'tab-staging', pane: 'pane-staging', refresh: true  },
+  { tab: 'tab-amerged', pane: 'pane-amerged', refresh: false },
+];
+let stagingLoaded = false, amergedLoaded = false;
+
+function switchPrTab(activeTabId) {
+  PR_TABS.forEach(({ tab, pane, refresh }) => {
+    const isActive = tab === activeTabId;
+    document.getElementById(tab).classList.toggle('active', isActive);
+    document.getElementById(tab).setAttribute('aria-selected', isActive);
+    document.getElementById(pane).hidden = !isActive;
+    if (refresh) document.getElementById('staging-refresh').style.display = isActive ? '' : 'none';
+  });
+  if (activeTabId === 'tab-staging' && !stagingLoaded) { stagingLoaded = true; loadStagingPrs(); }
+  if (activeTabId === 'tab-amerged' && !amergedLoaded) { amergedLoaded = true; loadAutoMerges(); }
+}
+
+PR_TABS.forEach(({ tab }) => {
+  document.getElementById(tab).addEventListener('click', () => switchPrTab(tab));
+});
+
 // ── Staging PRs ──────────────────────────────────────────────────────────────
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c =>
@@ -892,8 +918,6 @@ async function handleAutoMergedRevert(e) {
 
 document.getElementById('auto-merged-list').addEventListener('click', handleAutoMergedRevert);
 document.getElementById('staging-refresh').addEventListener('click', loadStagingPrs);
-loadStagingPrs();
-loadAutoMerges();
 
 </script>
 </body>

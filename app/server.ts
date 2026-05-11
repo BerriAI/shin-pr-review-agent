@@ -1029,6 +1029,20 @@ app.post("/chat/api", requireLogin, async (req, res) => {
   dbg(
     `POST /chat/api: ENTER tid=${tid} runId=${run_id ?? "none"} msgLen=${message.length} preview="${message.slice(0, 80)}"`,
   );
+
+  // Render's proxy times out idle connections after 60s and returns 502.
+  // Send periodic newline bytes every 30s to keep the connection alive
+  // while the agent runs (reviews take 60-180s). The final response is
+  // valid JSON — the leading newlines are ignored by JSON.parse().
+  res.setHeader("Content-Type", "application/json");
+  res.setHeader("Transfer-Encoding", "chunked");
+  res.setHeader("Connection", "keep-alive");
+  const keepalive = setInterval(() => res.write("\n"), 30_000);
+  const finish = (status: number, body: object) => {
+    clearInterval(keepalive);
+    res.status(status).end(JSON.stringify(body));
+  };
+
   try {
     await ensureChatSession(tid, title, run_id);
     dbg(
@@ -1043,7 +1057,7 @@ app.post("/chat/api", requireLogin, async (req, res) => {
     dbg(
       `POST /chat/api: promptChatSession resolved (${Date.now() - t0}ms total) outputLen=${output.length}`,
     );
-    res.json({
+    finish(200, {
       output,
       tool_trace: toolTrace,
       thread_id: tid,
@@ -1052,7 +1066,7 @@ app.post("/chat/api", requireLogin, async (req, res) => {
     });
   } catch (err) {
     dbg(`POST /chat/api: THREW after ${Date.now() - t0}ms`, err);
-    res.json({
+    finish(200, {
       output: `⚠️ agent failed: ${err}`,
       tool_trace: [],
       thread_id: tid,

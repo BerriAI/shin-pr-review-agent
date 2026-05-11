@@ -291,7 +291,8 @@ async function ensureStagingPr(
         title: `[litellm-agent] Staging → ${baseBranch} (${dateLabel})`,
         head: stagingBranch,
         base: baseBranch,
-        body: `Automated staging PR created by litellm-agent.\n\nThis branch collects PRs approved by the agent on ${dateLabel}.`,
+        draft: true,
+        body: `Automated staging PR created by litellm-agent.\n\nThis branch collects PRs approved by the agent on ${dateLabel}.\n\n> ⚠️ **Human review required before CI.** Convert from draft to ready when you've reviewed the diff.`,
       }),
     },
   );
@@ -320,6 +321,37 @@ async function ensureStagingPr(
   }
 
   return { html_url: created.html_url, number: created.number, created: true };
+}
+
+async function updateStagingPrDescription(
+  token: string,
+  repoFullName: string,
+  stagingPrNumber: number,
+  ghHeaders: Record<string, string>,
+): Promise<void> {
+  const merges = await db.listMergesForStagingPr(stagingPrNumber, repoFullName);
+  if (!merges.length) return;
+
+  const [owner, repoName] = repoFullName.split("/");
+  const rows = merges
+    .map((m) => {
+      const title = m.pr_title ?? `PR #${m.pr_number}`;
+      return `| #${m.pr_number} | [${title}](https://github.com/${owner}/${repoName}/pull/${m.pr_number}) |`;
+    })
+    .join("\n");
+
+  const body =
+    `## Merged PRs (${merges.length})\n\n` +
+    `| # | Title |\n|---|-------|\n` +
+    rows +
+    `\n\n---\n_Auto-updated by litellm-agent on each merge._`;
+
+  await fetch(`https://api.github.com/repos/${repoFullName}/pulls/${stagingPrNumber}`, {
+    method: "PATCH",
+    headers: ghHeaders,
+    body: JSON.stringify({ body }),
+  });
+  console.log(`[staging-pr] updated description for PR #${stagingPrNumber} (${merges.length} merges)`);
 }
 
 async function mergePrToAgentBranch(
@@ -402,6 +434,11 @@ async function mergePrToAgentBranch(
     headers: ghHeaders,
     body: JSON.stringify({ body: "@greptile please review" }),
   }).catch((err) => console.warn(`[merge] greptile trigger on staging PR #${stagingPr.number} failed:`, err));
+
+  // Rebuild staging PR description with updated merged-PR list.
+  await updateStagingPrDescription(token, repoFullName, stagingPr.number, ghHeaders).catch(
+    (err) => console.warn(`[merge] staging PR description update failed:`, err),
+  );
 
   return {
     merge_commit_sha,
@@ -627,6 +664,28 @@ async function headCommitDate(
   return date ? new Date(date) : null;
 }
 
+const INJECTION_PATTERNS: [RegExp, string][] = [
+  [/ignore\s+(previous|above|all|prior)\s+instructions?/i,         "ignore-instructions"],
+  [/disregard\s+(previous|above|all|prior|the\s+above)/i,          "disregard-instructions"],
+  [/\byou\s+are\s+now\s+(a|an|the)\b/i,                            "persona-override"],
+  [/\bact\s+as\s+(a|an|the|if)\b/i,                                "act-as-override"],
+  [/\bnew\s+(persona|role|system\s+prompt)\b/i,                    "new-persona"],
+  [/<\s*system\s*>/i,                                               "system-tag"],
+  [/\[INST\]/,                                                      "inst-tag"],
+  [/mark\s+(this\s+)?(pr|pull\s+request)\s+(as\s+)?(ready|approved|safe|merged)/i, "verdict-override"],
+  [/approve\s+(this\s+)?(pr|pull\s+request)\b/i,                   "approve-override"],
+  [/do\s+not\s+(block|flag|reject|review)\s+this/i,                "block-bypass"],
+  [/[​-‏‪-‮⁠-⁤﻿]/,             "hidden-unicode"],
+];
+
+function detectPromptInjection(fields: string[]): string | null {
+  const text = fields.join("\n");
+  for (const [pattern, label] of INJECTION_PATTERNS) {
+    if (pattern.test(text)) return label;
+  }
+  return null;
+}
+
 function renderBlockedComment(card: TriageCard, fuseTrace: FuseTraceEntry[]): string {
   const fired = fuseTrace.filter((e) => e.fired);
   const bullets = fired
@@ -673,6 +732,29 @@ async function runWebhookReview(
   }
   if (_WHITELIST_ENTRIES.length && isWhitelistedLogin(pr.user.login)) {
     console.log(`[webhook] delivery=${delivery} PR #${prNumber} author=${pr.user.login} is whitelisted, skipping`);
+    return;
+  }
+
+  const injectionHit = detectPromptInjection([pr.title ?? "", pr.body ?? "", pr.head?.ref ?? ""]);
+  if (injectionHit) {
+    console.warn(`[webhook] delivery=${delivery} PR #${prNumber} BLOCKED — prompt injection detected: ${injectionHit}`);
+    await fetch(
+      `https://api.github.com/repos/${repoFullName}/issues/${prNumber}/comments`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          body: `🤖 **litellm-agent**: This PR has been **blocked** from automated review.\n\n` +
+                `Reason: potential prompt injection detected in PR metadata (\`${injectionHit}\`).\n\n` +
+                `A human reviewer must inspect this PR manually before it can proceed.`,
+        }),
+      },
+    ).catch((err) => console.warn(`[injection] comment failed for PR #${prNumber}:`, err));
     return;
   }
 

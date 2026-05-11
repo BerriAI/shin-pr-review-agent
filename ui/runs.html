@@ -296,17 +296,10 @@
       <button id="backfill-btn" type="button">▶ Run last N open PRs</button>
     </div>
     <div id="backfill-status"></div>
-    <div id="staging-controls" style="display:none;flex-direction:column;gap:4px">
-      <div style="display:flex;gap:6px;align-items:center">
-        <button id="staging-refresh-btn" type="button">↺ Refresh</button>
-        <span id="staging-status"></span>
-      </div>
     </div>
   </div>
   <div id="view-tabs">
     <button class="view-tab active" data-view="runs" type="button">Runs</button>
-    <button class="view-tab" data-view="staging-prs" type="button">Staging PRs</button>
-    <button class="view-tab" data-view="auto-merged" type="button">Auto-merged</button>
     <button class="view-tab" data-view="agent" type="button">Agent</button>
   </div>
   <div id="filter-tabs">
@@ -315,8 +308,6 @@
     <button class="filter-tab" data-filter="blocked" type="button">✗ Blocked</button>
   </div>
   <div id="runs-list"><div class="empty">Loading…</div></div>
-  <div id="staging-prs-list"><div class="empty">Loading…</div></div>
-  <div id="auto-merged-list"><div class="empty">Loading…</div></div>
   <div id="agent-panel" style="display:none;flex:1;overflow-y:auto"><div class="empty">Loading…</div></div>
 </aside>
 <main id="main">

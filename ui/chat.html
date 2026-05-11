@@ -33,7 +33,7 @@
     .app-body{display:flex;flex:1;overflow:hidden}
 
     /* ── Topbar (same as dashboard) ── */
-    #topbar{position:fixed;top:0;left:0;right:0;height:57px;z-index:100;display:flex;align-items:center;gap:0;padding:0 20px;border-bottom:1px solid var(--border);background:hsla(0 0% 100% / 0.9);backdrop-filter:blur(12px)}
+    #topbar{position:relative;flex-shrink:0;height:57px;z-index:10;display:flex;align-items:center;gap:0;padding:0 20px;border-bottom:1px solid var(--border);background:var(--bg)}
     .topbar-brand{display:flex;align-items:center;gap:8px;padding-right:16px;border-right:1px solid var(--border)}
     .topbar-brand-mark{font-size:17px;line-height:1}
     .topbar-brand-name{font-size:13px;font-weight:700;color:var(--fg);letter-spacing:-.01em}

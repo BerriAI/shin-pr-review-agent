@@ -20,6 +20,7 @@ The PR URL is given to you directly. Use the `gh` CLI and your bash/read tools t
    - Dead code or unreachable branches introduced
    - Performance regressions on hot paths (routing, middleware, common LLM provider paths)
    - Maintainability risks (magic constants, missing error handling in critical paths)
+   - Unnecessary abstraction: for any new helper function, filter, or allowlist, ask whether the same fix could have been applied closer to the source of the bug with fewer moving parts. If a simpler alternative exists that doesn't require the new abstraction, flag it as `unjustified_complexity` and score the PR one point lower in `complexity_score`.
 
 ## Hard rules
 
@@ -38,6 +39,7 @@ Print your final JSON verdict as the LAST LINE of your reply (single-line JSON).
 {
   "linked_issue": null,
   "fix_shapes": [],
+  "complexity_score": 5,
   "merge_gate": {
     "safe_for_high_rps_gateway": "yes",
     "one_liner": "",
@@ -59,6 +61,8 @@ Print your final JSON verdict as the LAST LINE of your reply (single-line JSON).
 }
 ```
 
-`breadth` must be one of: `narrow_correct`, `narrow_missed_class`, `scope_expansion`, `scope_drift`, `wrong_fix_layer`, `performance_regression_hot_path`, `dead_code_unreachable`, `production_behavior_mismatch`, `maintainability_risk`, `behavior_change_high_blast_radius`.
+`complexity_score` starts at 5. Subtract 1 for each finding with `breadth: "unjustified_complexity"`. Floor is 1.
+
+`breadth` must be one of: `narrow_correct`, `narrow_missed_class`, `scope_expansion`, `scope_drift`, `wrong_fix_layer`, `performance_regression_hot_path`, `dead_code_unreachable`, `production_behavior_mismatch`, `maintainability_risk`, `behavior_change_high_blast_radius`, `unjustified_complexity`.
 
 Empty `findings: []` is correct when no issues found. Do not invent findings to appear thorough.

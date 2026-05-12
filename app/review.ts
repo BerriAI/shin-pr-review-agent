@@ -2934,18 +2934,10 @@ async function runChatTurn(
     }
   }
 
-  const fullMessage = reviewBlocks.length
-    ? `${reviewBlocks.join("\n\n")}\n\n---\nUser message:\n${message}`
-    : message;
-  const { output: rawOutput, toolTrace } = await runPrompt(thread.agent!, fullMessage, onStream);
-  // If the Cursor chat agent returned empty text (e.g. it hit an error or the
-  // context was too large) but we have review content, surface the review
-  // directly so the API response is never an empty string. This prevents
-  // the "/chat/api output: ''" symptom when triage falls back to gather-only.
-  const output =
-    rawOutput.trim() === "" && reviewBlocks.length > 0
-      ? reviewBlocks.join("\n\n")
-      : rawOutput;
+  if (reviewBlocks.length > 0) {
+    return { output: reviewBlocks.join("\n\n"), toolTrace: trace };
+  }
+  const { output, toolTrace } = await runPrompt(thread.agent!, message, onStream);
   return { output, toolTrace: [...trace, ...toolTrace] };
 }
 

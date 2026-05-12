@@ -575,7 +575,7 @@ const PatternFindingSchema = z.object({
   risk: z.enum(["high", "medium", "low"]).default("low"),
   source: z.enum(["docs", "code"]),
   citation: z.string(),
-  rationale: z.string().max(200),
+  rationale: z.string().max(400),
 });
 
 const TechDebtItemSchema = z.object({
@@ -589,6 +589,23 @@ export const PatternReportSchema = z.object({
   tech_debt: z.array(TechDebtItemSchema).default([]),
 });
 export type PatternReport = z.infer<typeof PatternReportSchema>;
+
+// --- Security agent schemas ---------------------------------------------------
+
+const SecurityFindingSchema = z.object({
+  file: z.string().default(""),
+  severity: z.enum(["critical", "high", "medium", "low", "info"]).default("info"),
+  vulnerability_type: z.string().default(""),
+  description: z.string().default(""),
+  recommendation: z.string().default(""),
+});
+
+export const SecurityReportSchema = z.object({
+  findings: z.array(SecurityFindingSchema).default([]),
+  summary: z.string().default(""),
+  overall_risk: z.enum(["critical", "high", "medium", "low", "none"]).default("none"),
+});
+export type SecurityReport = z.infer<typeof SecurityReportSchema>;
 
 const KarpathyFindingSchema = z.object({
   regression_archetype: z.string().default(""),
@@ -707,6 +724,63 @@ async function newSession(
   return session;
 }
 
+// --- Security agent (LiteLLM Managed Agent) -----------------------------------
+
+const SECURITY_AGENT_BASE = process.env.SECURITY_AGENT_BASE?.replace(/\/+$/, "") ?? "";
+const SECURITY_AGENT_ID = process.env.SECURITY_AGENT_ID ?? "";
+
+async function _spawnSecuritySession(key: string): Promise<string> {
+  const r = await fetch(
+    `${SECURITY_AGENT_BASE}/v1/managed_agents/agents/${SECURITY_AGENT_ID}/session`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "security review" }),
+    },
+  );
+  if (!r.ok) throw new Error(`security: spawn session HTTP ${r.status}`);
+  const data = (await r.json()) as { session_id?: string; id?: string };
+  const sid = data.session_id ?? data.id;
+  if (!sid) throw new Error("security: no session_id in spawn response");
+  return sid;
+}
+
+async function _sendSecurityMessage(sessionId: string, text: string, key: string): Promise<string> {
+  const r = await fetch(
+    `${SECURITY_AGENT_BASE}/v1/managed_agents/sessions/${sessionId}/message`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    },
+  );
+  if (!r.ok) throw new Error(`security: send message HTTP ${r.status}`);
+  const data = (await r.json()) as {
+    response?: string; content?: string; text?: string; message?: string;
+  };
+  return data.response ?? data.content ?? data.text ?? data.message ?? JSON.stringify(data);
+}
+
+export async function runSecurityCheck(prUrl: string): Promise<SecurityReport | null> {
+  const key = _litellmKey ?? process.env.LITELLM_API_KEY;
+  if (!key || !SECURITY_AGENT_BASE || !SECURITY_AGENT_ID) return null;
+  try {
+    const sessionId = await _spawnSecuritySession(key);
+    const response = await _sendSecurityMessage(
+      sessionId,
+      `Review this GitHub PR for security vulnerabilities: ${prUrl}`,
+      key,
+    );
+    const raw = extractLastJson(response);
+    if (raw) {
+      return SecurityReportSchema.parse(raw);
+    }
+    return SecurityReportSchema.parse({ summary: response.trim().slice(0, 500) });
+  } catch {
+    return null;
+  }
+}
+
 // --- Karpathy check via Pi SDK ------------------------------------------------
 
 export async function runKarpathyCheck(
@@ -784,6 +858,7 @@ export function fuse(
   t: TriageReport,
   p: PatternReport,
   k: KarpathyReview | null = null,
+  s: SecurityReport | null = null,
 ): TriageCard {
   type RubricRow = [
     number,
@@ -873,6 +948,29 @@ export function fuse(
     score -= kw;
     if (kl) penalties.push(kl);
   }
+
+  if (s) {
+    const criticalFindings = s.findings.filter((f) => f.severity === "critical");
+    const highFindings = s.findings.filter((f) => f.severity === "high");
+    if (s.overall_risk === "critical" || criticalFindings.length > 0) {
+      score -= 3;
+      const label = s.summary
+        ? `security critical — ${s.summary.slice(0, 100)}`
+        : `${plural(criticalFindings.length, "critical security finding")}`;
+      penalties.push(label);
+    } else if (s.overall_risk === "high" || highFindings.length > 0) {
+      score -= 2;
+      const files = highFindings.map((f) => f.file || f.vulnerability_type).filter(Boolean);
+      const label = files.length
+        ? `${plural(highFindings.length, "high-severity security finding")} (${join(files)})`
+        : `security high risk — ${s.summary.slice(0, 80) || "see security section"}`;
+      penalties.push(label);
+    } else if (s.overall_risk === "medium") {
+      score -= 1;
+      penalties.push(`security medium risk — ${s.summary.slice(0, 80) || "see security section"}`);
+    }
+  }
+
   score = Math.max(score, 0);
 
   let verdict: "READY" | "BLOCKED" | "WAITING";
@@ -895,7 +993,7 @@ export function fuse(
     score,
     verdict,
     emoji,
-    verdict_one_liner: composeOneLiner(verdict, penalties, t, p, k),
+    verdict_one_liner: composeOneLiner(verdict, penalties, t, p, k, s),
     justification: composeJustification(verdict, score, penalties, t, p),
   };
 }
@@ -925,6 +1023,7 @@ function composeOneLiner(
   t: TriageReport,
   p: PatternReport,
   k: KarpathyReview | null,
+  s: SecurityReport | null = null,
 ): string {
   if (verdict === "WAITING")
     return `${plural(t.running_checks.length, "check")} still running: ${join(t.running_checks)}.`;
@@ -949,6 +1048,16 @@ function composeOneLiner(
       return gate === "no"
         ? "Karpathy hold — staff-eng review flagged production risk."
         : "Karpathy conditional — see merge gate for what's needed.";
+    }
+  }
+  if (s) {
+    const criticalFindings = s.findings.filter((f) => f.severity === "critical");
+    const highFindings = s.findings.filter((f) => f.severity === "high");
+    if (s.overall_risk === "critical" || criticalFindings.length > 0) {
+      return `Security: critical risk — ${s.summary.slice(0, 120) || "see security section"}.`;
+    }
+    if (s.overall_risk === "high" || highFindings.length > 0) {
+      return `Security: high risk — ${s.summary.slice(0, 120) || "see security section"}.`;
     }
   }
   if (t.scope_drift) {
@@ -1023,6 +1132,7 @@ export function renderDrilldown(
   t: TriageReport,
   p: PatternReport,
   k: KarpathyReview | null = null,
+  s: SecurityReport | null = null,
 ): string {
   const lines = ["*Drill-down*"];
   if (t.has_merge_conflicts === true) {
@@ -1126,6 +1236,28 @@ export function renderDrilldown(
         lines.push(`      recommend: ${f.recommended_fix}`);
     });
   }
+  if (s) {
+    const sevOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+    const sorted = [...s.findings].sort(
+      (a, b) => (sevOrder[a.severity] ?? 5) - (sevOrder[b.severity] ?? 5),
+    );
+    lines.push("\n_Security review_");
+    if (s.overall_risk !== "none") {
+      lines.push(`  overall risk: ${s.overall_risk}${s.summary ? ` — ${s.summary}` : ""}`);
+    } else if (s.summary) {
+      lines.push(`  ${s.summary}`);
+    }
+    sorted.forEach((f) => {
+      const loc = f.file ? ` \`${f.file}\`` : "";
+      const type = f.vulnerability_type ? ` [${f.vulnerability_type}]` : "";
+      const rec = f.recommendation ? ` → ${f.recommendation}` : "";
+      lines.push(`  • [${f.severity}]${type}${loc} — ${f.description}${rec}`);
+    });
+    if (!sorted.length && !s.summary) {
+      lines.push("  No security findings.");
+    }
+  }
+
   if (lines.length === 1)
     lines.push("Nothing to drill into. Card has the full story.");
   return lines.join("\n");
@@ -1274,6 +1406,7 @@ export async function reviewPr(
 
   let triage: TriageReport | null = null;
   let pattern: PatternReport | null = null;
+  let security: SecurityReport | null = null;
   let triageTrace: ToolTraceEntry[] = [];
   let patternTrace: ToolTraceEntry[] = [];
   let triageErr = "";
@@ -1282,7 +1415,7 @@ export async function reviewPr(
   let patternPlainAppend = "";
 
   log(`starting triage + pattern in parallel for ${prUrl}`);
-  // Run triage + pattern in parallel
+  // Run triage + pattern + security in parallel
   await Promise.all([
     (async () => {
       try {
@@ -1363,18 +1496,24 @@ export async function reviewPr(
 
   log("starting provisional fuse");
 
-  // Karpathy runs only when triage+pattern would READY
+  // Karpathy + security run only when triage+pattern would READY
   const provisional = fuse(triage, pattern);
   let karpathy: KarpathyReview | null = null;
   log(`provisional verdict: ${JSON.stringify(provisional)}`);
   if (provisional.verdict === "READY") {
-    log("karpathy check: running");
-    karpathy = await runKarpathyCheck(prUrl).catch(() => null);
+    log("karpathy + security check: running");
+    [karpathy, security] = await Promise.all([
+      runKarpathyCheck(prUrl).catch(() => null),
+      runSecurityCheck(prUrl).then(
+        (r) => { log(r ? "security: done ✓" : "security: skipped (no key)"); return r; },
+        (e) => { log(`security: ERROR — ${e}`); return null; },
+      ),
+    ]);
   }
 
-  const card = fuse(triage, pattern, karpathy);
+  const card = fuse(triage, pattern, karpathy, security);
   const cardText = renderCard(card);
-  let drilldown = renderDrilldown(triage, pattern, karpathy);
+  let drilldown = renderDrilldown(triage, pattern, karpathy, security);
   if (triagePlainAppend) {
     drilldown +=
       "\n\n_Triage agent output (no JSON; verbatim)_\n\n" + triagePlainAppend;

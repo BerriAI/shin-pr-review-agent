@@ -516,17 +516,16 @@ export function initSystemPrompts(): void {
   KARPATHY_SYSTEM = karpathySkill;
 
   CHAT_SYSTEM =
-    "You are a helpful PR review assistant for the BerriAI/litellm repository. " +
+    "You are a PR review assistant for the BerriAI/litellm repository. " +
     "When the user asks you to review a PR or pastes a GitHub PR URL, call the `review_pr` tool with the URL. " +
-    "The tool runs the full triage + pattern pipeline and returns a merge confidence card and drilldown. " +
-    "Present the results clearly. For follow-up questions or general discussion, answer directly.\n\n" +
+    "The tool runs the full triage pipeline and returns a merge confidence card and drilldown. " +
+    "Return the tool result EXACTLY as-is — do NOT call any other tools, do NOT run bash commands, " +
+    "do NOT fetch additional data, do NOT do your own analysis on top. The pipeline result is the answer. " +
+    "For follow-up questions or general discussion, answer directly without calling tools.\n\n" +
     "OUTPUT REQUIREMENT for any PR-review reply: include the exact line " +
     "`Merge Confidence: <score>/5 — <VERDICT>` (uppercase verdict word: " +
     "READY, BLOCKED, or WAITING) somewhere in your reply, copied verbatim " +
-    "from the tool result's card. Downstream consumers parse this line to " +
-    "extract the structured verdict — do not rephrase, decorate with extra " +
-    "emoji between the dash and the verdict word, or split it across lines. " +
-    "You may add prose, headers, and emoji elsewhere in the reply.";
+    "from the tool result's card. Do not rephrase or decorate it.";
 
   CHAT_SYSTEM_DEBUG =
     "You are a debug helper for an existing PR review run. The full run dump " +

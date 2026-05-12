@@ -15,6 +15,8 @@
   #sidebar-head h2{font-size:13px;margin:0;flex:1;color:#333}
   #nav-link{font-size:12px;color:#06c;text-decoration:none;padding:4px 8px;border:1px solid #ddd;border-radius:4px;background:#fff}
   #nav-link:hover{background:#eef}
+  #search-box{padding:8px 14px;border-bottom:1px solid #e0e0e3}
+  #search-box input{width:100%;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font:inherit;font-size:12px}
   #runs-list{flex:1;overflow-y:auto}
   .run-row{padding:10px 14px;border-bottom:1px solid #eee;cursor:pointer;display:flex;flex-direction:column;gap:4px}
   .run-row:hover{background:#eef}
@@ -127,6 +129,7 @@
     <h2>Agent runs</h2>
     <a id="nav-link" href="/chat">Chat →</a>
   </div>
+  <div id="search-box"><input id="search-input" type="search" placeholder="Search by PR #, title, author, or URL…"></div>
   <div id="runs-list"><div class="empty">Loading…</div></div>
 </aside>
 <main id="main">
@@ -137,8 +140,11 @@
 const runsListEl = document.getElementById('runs-list');
 const detailEl = document.getElementById('detail');
 const emptyDetailEl = document.getElementById('empty-detail');
+const searchInput = document.getElementById('search-input');
 let activeRunId = null;
 let runs = [];
+
+searchInput.addEventListener('input', () => renderRunsList());
 
 async function authFetch(url, opts){
   const r = await fetch(url, opts);
@@ -160,11 +166,22 @@ function verdictBadgeClass(v){
 
 function renderRunsList(){
   runsListEl.innerHTML = '';
-  if (!runs.length) {
-    runsListEl.innerHTML = '<div class="empty">No runs yet. They\'ll appear here as the agent reviews PRs.</div>';
+  const q = searchInput.value.trim().toLowerCase();
+  const visible = q
+    ? runs.filter(r =>
+        String(r.pr_number).includes(q) ||
+        (r.pr_title || '').toLowerCase().includes(q) ||
+        (r.pr_author || '').toLowerCase().includes(q) ||
+        (r.pr_url || '').toLowerCase().includes(q)
+      )
+    : runs;
+  if (!visible.length) {
+    runsListEl.innerHTML = q
+      ? '<div class="empty">No runs match "' + escapeHtml(q) + '".</div>'
+      : '<div class="empty">No runs yet. They\'ll appear here as the agent reviews PRs.</div>';
     return;
   }
-  for (const r of runs) {
+  for (const r of visible) {
     const row = document.createElement('div');
     row.className = 'run-row' + (r.run_id === activeRunId ? ' active' : '');
     row.dataset.id = r.run_id;

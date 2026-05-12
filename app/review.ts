@@ -557,7 +557,7 @@ export function initSystemPrompts(): void {
 
 const PriorSignalSchema = z.object({
   source: z.string(),
-  excerpt: z.string().max(200),
+  excerpt: z.string().max(400),
   severity: z.enum(["nit", "concern", "blocker"]),
   status: z.enum(["agreed", "resolved", "disagreed", "out_of_scope"]),
   reason: z.string().default(""),

@@ -206,25 +206,27 @@ export async function runPrompt(
     unsubscribe();
   }
 
-  if (!assistantText.trim()) {
-    const msgs: any[] =
-      (session as any).messages ??
-      (session as any).agent?.state?.messages ??
-      [];
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const m = msgs[i];
-      if (m?.role === "assistant") {
-        const c = m.content;
-        if (typeof c === "string") {
-          assistantText = c;
-        } else if (Array.isArray(c)) {
-          assistantText = c
-            .filter((p: any) => p?.type === "text")
-            .map((p: any) => p.text)
-            .join("");
-        }
-        break;
+  // agent_end fires at tool-execution boundary, not after text streaming
+  // completes. Always prefer session.messages (complete) over streamed deltas.
+  const msgs: any[] =
+    (session as any).messages ??
+    (session as any).agent?.state?.messages ??
+    [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m?.role === "assistant") {
+      const c = m.content;
+      let full = "";
+      if (typeof c === "string") {
+        full = c;
+      } else if (Array.isArray(c)) {
+        full = c
+          .filter((p: any) => p?.type === "text")
+          .map((p: any) => p.text)
+          .join("");
       }
+      if (full.length > assistantText.length) assistantText = full;
+      break;
     }
   }
 

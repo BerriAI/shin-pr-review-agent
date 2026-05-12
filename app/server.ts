@@ -2986,6 +2986,19 @@ async function pollStuckKarpathy(): Promise<void> {
 setInterval(() => { pollStuckKarpathy().catch(console.error); }, KARPATHY_STUCK_INTERVAL_MS);
 pollStuckKarpathy().catch(console.error);
 
+async function pollStuckCoverageGap(): Promise<void> {
+  try {
+    const flipped = await db.flipStuckCoverageGapToKilled(600);
+    if (flipped > 0) {
+      console.log(`[coverage-gap-watchdog] flipped ${flipped} stuck rows to killed`);
+    }
+  } catch (e) {
+    console.error("[coverage-gap-watchdog] poll error:", e);
+  }
+}
+setInterval(() => { pollStuckCoverageGap().catch(console.error); }, KARPATHY_STUCK_INTERVAL_MS);
+pollStuckCoverageGap().catch(console.error);
+
 // --- PR scan loop -------------------------------------------------------------
 // Restart-safe replacement for the in-memory greptileReadyShas signal.
 // Lists most-recently-updated open PRs and triggers review on any that are

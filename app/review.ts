@@ -460,6 +460,7 @@ const PATTERN_OUTPUT_OVERRIDE =
 let TRIAGE_SYSTEM: string;
 let TRIAGE_SYSTEM_SINGLE_SHOT: string;
 let KARPATHY_SYSTEM: string;
+let COVERAGE_GAP_SYSTEM: string;
 let CHAT_SYSTEM: string;
 let CHAT_SYSTEM_DEBUG: string;
 let PATTERN_SYSTEM_SINGLE_SHOT: string;
@@ -514,6 +515,22 @@ export function initSystemPrompts(): void {
     "\n\nPrint your JSON on the LAST LINE of your response. Single-line JSON only.";
 
   KARPATHY_SYSTEM = karpathySkill;
+
+  COVERAGE_GAP_SYSTEM = `\
+You are a test coverage gap detector for the BerriAI/litellm repository.
+You do NOT review code quality, logic correctness, or style.
+Your ONLY job: find untested input classes for new filters/guards/allowlists.
+
+CRITICAL: Do NOT narrate your steps. Do NOT output prose during your search.
+Run all tool calls silently. When done, output ONLY the final JSON — nothing else.
+
+1. Fetch the PR diff (web_fetch the /files page or .diff URL).
+2. Find every new filter/guard/allowlist added (if x not in list, filter(lambda…), assert x in allowed).
+3. For each guard: grep the repo to find all values that flow into the guarded list.
+4. For each input class found: grep tests/ to check if a test covers it through this guard.
+5. Output the JSON below — last line, single-line object, nothing after it.
+
+{"pr":"<pr_url>","guards":[{"guard_fn":"<fn>","file":"<path>","line":<n>,"input_classes":[{"name":"<name>","example":"<val>","source":"<where>","has_test":<bool>,"test_file":"<path|null>","suggested_test":"<fn|null>"}]}],"gaps":<n>,"verdict":"<BLOCKED|COVERED>"}`;
 
   CHAT_SYSTEM =
     "You are a helpful PR review assistant for the BerriAI/litellm repository. " +
@@ -640,6 +657,64 @@ export const SecurityReportSchema = z.object({
   overall_risk: z.enum(["critical", "high", "medium", "low", "none"]).default("none"),
 });
 export type SecurityReport = z.infer<typeof SecurityReportSchema>;
+
+// --- Coverage gap check types -------------------------------------------------
+
+export type CoverageGapSkipReason =
+  | "provisional_not_ready"
+  | "no_cursor_key"
+  | "invalid_pr_url";
+
+export type CoverageGapErrorKind =
+  | "cursor_agent_error"
+  | "no_json_in_output"
+  | "unknown";
+
+export type CoverageGapInputClass = {
+  name: string;
+  example: string;
+  source: string;
+  has_test: boolean;
+  test_file: string | null;
+  suggested_test: string | null;
+};
+
+export type CoverageGapGuard = {
+  guard_fn: string;
+  file: string;
+  line: number;
+  input_classes: CoverageGapInputClass[];
+};
+
+export type CoverageGapResult = {
+  pr: string;
+  guards: CoverageGapGuard[];
+  gaps: number;
+  verdict: "BLOCKED" | "COVERED";
+};
+
+export type CoverageGapRecord =
+  | { status: "skipped"; skip_reason: CoverageGapSkipReason }
+  | { status: "running"; started_at: number }
+  | {
+      status: "ok";
+      started_at: number;
+      finished_at: number;
+      duration_ms: number;
+      result: CoverageGapResult;
+      tool_trace?: ToolTraceEntry[];
+      cursor_agent_url?: string;
+    }
+  | {
+      status: "errored";
+      started_at: number;
+      finished_at: number;
+      duration_ms: number;
+      error: { kind: CoverageGapErrorKind; message: string };
+      tool_trace?: ToolTraceEntry[];
+      cursor_agent_url?: string;
+    }
+  | { status: "killed"; started_at: number; flipped_at: number };
 
 /** Matches the VERDICT JSON schema in `skills/karpathy.md`. */
 const KarpathyBlockingReasonCategorySchema = z.enum([
@@ -1020,6 +1095,83 @@ export async function runKarpathyCheck(
 }
 
 
+// --- Coverage gap check -------------------------------------------------------
+
+export async function runCoverageGapCheck(
+  prUrl: string,
+): Promise<CoverageGapRecord> {
+  const started_at = Date.now() / 1000;
+  const t0 = Date.now();
+
+  if (!CURSOR_API_KEY) return { status: "skipped", skip_reason: "no_cursor_key" };
+  const prNum = prNumberFromUrl(prUrl);
+  if (!prNum) return { status: "skipped", skip_reason: "invalid_pr_url" };
+
+  let toolTrace: ToolTraceEntry[] = [];
+  let cursorAgentUrl: string | undefined;
+
+  return llmTracer.startActiveSpan("coverage_gap_check", async (span): Promise<CoverageGapRecord> => {
+    span.setAttributes({
+      [SemanticConventions.LLM_SYSTEM]: "cursor",
+      "pr_url": prUrl,
+    });
+    try {
+      const agent = await newCloudAgent("coverage-gap");
+      const agentId: string | undefined = (agent as any).agentId;
+      if (agentId) cursorAgentUrl = `https://cursor.com/agents/${agentId}`;
+
+      const prompt = `${COVERAGE_GAP_SYSTEM}\n\n---\n\nAnalyse this PR for test coverage gaps: ${prUrl}\n\nReturn the JSON verdict on the LAST LINE as a single-line object.`;
+      const { output, toolTrace: rawTrace } = await runPrompt(agent, prompt);
+      toolTrace = capTrace(rawTrace);
+
+      const raw = extractLastJson(output);
+      if (!raw) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: "no JSON in output" });
+        span.end();
+        return {
+          status: "errored",
+          started_at,
+          finished_at: Date.now() / 1000,
+          duration_ms: Date.now() - t0,
+          error: { kind: "no_json_in_output" as CoverageGapErrorKind, message: _stdoutTail(output) },
+          tool_trace: toolTrace,
+          ...(cursorAgentUrl ? { cursor_agent_url: cursorAgentUrl } : {}),
+        };
+      }
+
+      const result = raw as CoverageGapResult;
+      span.setAttribute("gaps", result.gaps ?? 0);
+      span.setAttribute("verdict", result.verdict ?? "UNKNOWN");
+      span.setStatus({ code: SpanStatusCode.OK });
+      span.end();
+      return {
+        status: "ok",
+        started_at,
+        finished_at: Date.now() / 1000,
+        duration_ms: Date.now() - t0,
+        result,
+        tool_trace: toolTrace,
+        ...(cursorAgentUrl ? { cursor_agent_url: cursorAgentUrl } : {}),
+      };
+    } catch (err) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+      span.end();
+      return {
+        status: "errored",
+        started_at,
+        finished_at: Date.now() / 1000,
+        duration_ms: Date.now() - t0,
+        error: {
+          kind: "cursor_agent_error" as CoverageGapErrorKind,
+          message: String((err as Error)?.message ?? err).slice(0, 1000),
+        },
+        tool_trace: toolTrace,
+        ...(cursorAgentUrl ? { cursor_agent_url: cursorAgentUrl } : {}),
+      };
+    }
+  });
+}
+
 // --- Fuse logic (port of Python fuse()) ---------------------------------------
 
 export interface TriageCard {
@@ -1099,6 +1251,22 @@ function karpathyResult(k: KarpathyCheckRecord | null): KarpathyReview | null {
   return k.status === "ok" ? k.result : null;
 }
 
+function coverageGapPenalty(cg: CoverageGapRecord | null): [number, string | null] {
+  if (!cg || cg.status !== "ok") return [0, null];
+  const gaps = cg.result.gaps ?? 0;
+  if (!gaps) return [0, null];
+  const guards = cg.result.guards ?? [];
+  const suggestions = guards
+    .flatMap((g) => g.input_classes)
+    .filter((ic) => !ic.has_test && ic.suggested_test)
+    .map((ic) => ic.suggested_test!)
+    .slice(0, 3);
+  const label = suggestions.length
+    ? `${gaps} untested input class(es) — add: ${suggestions.join(", ")}`
+    : `${gaps} untested input class(es) in new filter`;
+  return [5, label];
+}
+
 function karpathyPenalty(k: KarpathyCheckRecord | null): [number, string | null] {
   const r = karpathyResult(k);
   if (!r) return [0, null];
@@ -1144,6 +1312,7 @@ export type RunTiming = {
   gates_ms?: number;
   triage_ms?: number;
   karpathy_ms?: number;
+  coverage_gap_ms?: number;
   fuse_ms?: number;
   total_ms?: number;
 };
@@ -1153,6 +1322,7 @@ export function fuse(
   p: PatternReport,
   k: KarpathyCheckRecord | null = null,
   s: SecurityReport | null = null,
+  cg: CoverageGapRecord | null = null,
 ): FuseResult {
   type RubricRow = [
     string, // stable rule key — must not change across releases (it's the
@@ -1306,6 +1476,19 @@ export function fuse(
     });
   }
 
+  const [cgw, cgl] = coverageGapPenalty(cg);
+  const cgFired = cgw > 0;
+  if (cgFired) {
+    score -= cgw;
+    if (cgl) penalties.push(cgl);
+  }
+  trace.push({
+    rule: "coverage_gap",
+    fired: cgFired,
+    weight: cgw,
+    label: cgFired ? cgl : null,
+  });
+
   score = Math.max(score, 0);
 
   let verdict: "READY" | "BLOCKED" | "WAITING";
@@ -1328,7 +1511,7 @@ export function fuse(
     score,
     verdict,
     emoji,
-    verdict_one_liner: composeOneLiner(verdict, penalties, t, p, k, s),
+    verdict_one_liner: composeOneLiner(verdict, penalties, t, p, k, s, cg),
     justification: composeJustification(verdict, score, penalties, t, p),
   };
   return { card, trace };
@@ -1360,6 +1543,7 @@ function composeOneLiner(
   p: PatternReport,
   kr: KarpathyCheckRecord | null,
   s: SecurityReport | null = null,
+  cg: CoverageGapRecord | null = null,
 ): string {
   const k = karpathyResult(kr);
   if (verdict === "WAITING")
@@ -1395,6 +1579,10 @@ function composeOneLiner(
       return `Security: critical risk — ${s.summary.slice(0, 120) || "see security section"}.`;
     if (s.overall_risk === "high" || highFindings.length > 0)
       return `Security: high risk — ${s.summary.slice(0, 120) || "see security section"}.`;
+  }
+  if (cg?.status === "ok" && cg.result.gaps > 0) {
+    const [, label] = coverageGapPenalty(cg);
+    return label ? `${label[0].toUpperCase()}${label.slice(1)}.` : "New filter missing test coverage for one or more input classes.";
   }
   if (t.scope_drift) {
     const reason = (t.scope_drift_reason || "see card").replace(/\.$/, "");
@@ -1469,6 +1657,7 @@ export function renderDrilldown(
   p: PatternReport,
   kr: KarpathyCheckRecord | null = null,
   s: SecurityReport | null = null,
+  cg: CoverageGapRecord | null = null,
 ): string {
   const k = karpathyResult(kr);
   const lines = ["*Drill-down*"];
@@ -1600,6 +1789,29 @@ export function renderDrilldown(
       lines.push(`  • [${f.severity}]${type}${loc} — ${f.description}${rec}`);
     });
     if (!sorted.length && !s.summary) lines.push("  No security findings.");
+  }
+  if (cg) {
+    lines.push("\n_Coverage gap check_");
+    if (cg.status === "ok") {
+      const r = cg.result;
+      lines.push(`  verdict=${r.verdict}  gaps=${r.gaps}`);
+      for (const guard of r.guards) {
+        const gapClasses = guard.input_classes.filter((ic) => !ic.has_test);
+        if (!gapClasses.length) continue;
+        lines.push(`  guard: \`${guard.guard_fn}\` (${guard.file}:${guard.line})`);
+        for (const ic of gapClasses) {
+          const suggest = ic.suggested_test ? ` → add \`${ic.suggested_test}\`` : "";
+          lines.push(`    ❌ [gap] ${ic.name} (e.g. \`${ic.example}\`)${suggest}`);
+        }
+      }
+      if (!r.gaps) lines.push("  All input classes covered.");
+    } else if (cg.status === "skipped") {
+      lines.push(`  skipped (${cg.skip_reason})`);
+    } else if (cg.status === "errored") {
+      lines.push(`  errored — ${cg.error.kind}: ${cg.error.message.slice(0, 200)}`);
+    } else {
+      lines.push(`  status=${cg.status}`);
+    }
   }
   if (lines.length === 1)
     lines.push("Nothing to drill into. Card has the full story.");
@@ -2432,19 +2644,31 @@ export async function reviewPr(
       dbg(`reviewPr: phase-A insertRun failed`, e);
     });
 
-  // PHASE B: actual karpathy + security invocations (parallel). runKarpathyCheck
-  // never throws — every failure path is reified into the returned record.
+  // PHASE B: karpathy + security + coverage gap (all parallel). All helpers
+  // never throw — every failure path is reified into the returned record.
   let security: SecurityReport | null = null;
+  let coverageGap: CoverageGapRecord | null = null;
   if (karpathyCheck.status === "running") {
     const kT0 = Date.now();
-    [karpathyCheck, security] = await Promise.all([
+    log("coverage_gap: running");
+    [karpathyCheck, security, coverageGap] = await Promise.all([
       runKarpathyCheck(prUrl),
       runSecurityCheck(prUrl).then(
         (r) => { log(r ? "security: done ✓" : "security: skipped (not configured)"); return r; },
         (e) => { log(`security: ERROR — ${e}`); return null; },
       ),
+      runCoverageGapCheck(prUrl).then(
+        (r) => {
+          if (r.status === "ok") log(`coverage_gap: ok — gaps=${r.result.gaps} verdict=${r.result.verdict}`);
+          else if (r.status === "errored") log(`coverage_gap: errored — ${r.error.kind}`);
+          else if (r.status === "skipped") log(`coverage_gap: skipped (${r.skip_reason})`);
+          return r;
+        },
+        (e) => { log(`coverage_gap: ERROR — ${e}`); return null; },
+      ),
     ]);
     timing.karpathy_ms = Date.now() - kT0;
+    timing.coverage_gap_ms = Date.now() - kT0;
     dbg(
       `reviewPr: karpathy returned in ${Date.now() - kT0}ms status=${karpathyCheck.status}`,
     );
@@ -2460,14 +2684,14 @@ export async function reviewPr(
   // karpathy ran), and recompute duration_s so the DB shows real wall time.
   dbg(`reviewPr: building final card + drilldown`);
   const fuseT0 = Date.now();
-  const { card, trace: finalFuseTrace } = fuse(triage, pattern, karpathyCheck, security);
+  const { card, trace: finalFuseTrace } = fuse(triage, pattern, karpathyCheck, security, coverageGap);
   timing.fuse_ms = Date.now() - fuseT0;
   // Provisional-fuse time (Phase A) was negligible; we track only the
   // final fuse pass to keep the timing object simple.
   void provisionalT0;
   fuseTrace = finalFuseTrace;
   const cardText = renderCard(card);
-  let drilldown = renderDrilldown(triage, pattern, karpathyCheck, security);
+  let drilldown = renderDrilldown(triage, pattern, karpathyCheck, security, coverageGap);
   if (triagePlainAppend) {
     drilldown +=
       "\n\n_Triage agent output (no JSON; verbatim)_\n\n" + triagePlainAppend;
@@ -2498,6 +2722,25 @@ export async function reviewPr(
     },
   );
 
+  const cgTracePreview = coverageGap
+    ? coverageGap.status === "ok"
+      ? `gaps=${coverageGap.result.gaps} verdict=${coverageGap.result.verdict} duration_ms=${coverageGap.duration_ms}`
+      : coverageGap.status === "errored"
+        ? `errored kind=${coverageGap.error.kind}`
+        : coverageGap.status === "skipped"
+          ? `skipped reason=${coverageGap.skip_reason}`
+          : coverageGap.status
+    : "did_not_run";
+  allTrace.push(
+    { kind: "call", tool: "coverage_gap_check", args: { pr_url: prUrl } },
+    {
+      kind: "result",
+      tool: "coverage_gap_check",
+      isError: !!coverageGap && coverageGap.status === "errored",
+      preview: cgTracePreview,
+    },
+  );
+
   log(`card: ${JSON.stringify(card)}`);
 
   const finalDuration = (Date.now() - t0) / 1000;
@@ -2521,6 +2764,7 @@ export async function reviewPr(
       card: card,
       messages: { triage: [], pattern: [] },
       karpathy_check: karpathyCheck,
+      coverage_gap: coverageGap ?? {},
       gate_results: gateEvaluations,
       fuse_trace: fuseTrace,
       timing,

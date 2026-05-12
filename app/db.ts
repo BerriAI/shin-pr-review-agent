@@ -53,18 +53,18 @@ export async function insertRun(record: Record<string, unknown>): Promise<void> 
       source, channel, thread_ts, duration_s, logfire_trace_id,
       model_name, tokens_in, tokens_out, cost_usd,
       triage, pattern, card, tool_trace, messages,
-      human_label, human_notes, karpathy_check,
+      human_label, human_notes, karpathy_check, coverage_gap,
       gate_results, fuse_trace, timing, automerge_decision, merge_error
     ) VALUES (
       $1, COALESCE(to_timestamp($2), NOW()), $3, $4, $5, $6,
       $7, $8, $9, $10, $11,
       $12, $13, $14, $15,
       $16, $17, $18, $19, $20,
-      $21, $22, $23,
-      COALESCE($24::jsonb, '[]'::jsonb),
+      $21, $22, $23, $24,
       COALESCE($25::jsonb, '[]'::jsonb),
-      COALESCE($26::jsonb, '{}'::jsonb),
-      $27::jsonb, $28
+      COALESCE($26::jsonb, '[]'::jsonb),
+      COALESCE($27::jsonb, '{}'::jsonb),
+      $28::jsonb, $29
     )
     ON CONFLICT (run_id) DO UPDATE SET
       ts = EXCLUDED.ts, pr_url = EXCLUDED.pr_url,
@@ -77,6 +77,7 @@ export async function insertRun(record: Record<string, unknown>): Promise<void> 
       triage = EXCLUDED.triage, pattern = EXCLUDED.pattern,
       card = EXCLUDED.card, tool_trace = EXCLUDED.tool_trace,
       messages = EXCLUDED.messages, karpathy_check = EXCLUDED.karpathy_check,
+      coverage_gap = EXCLUDED.coverage_gap,
       gate_results = EXCLUDED.gate_results,
       fuse_trace = EXCLUDED.fuse_trace,
       timing = EXCLUDED.timing,
@@ -95,6 +96,7 @@ export async function insertRun(record: Record<string, unknown>): Promise<void> 
     JSON.stringify(record.messages ?? { triage: [], pattern: [] }),
     record.human_label ?? null, record.human_notes ?? null,
     JSON.stringify(record.karpathy_check ?? {}),
+    JSON.stringify(record.coverage_gap ?? {}),
     JSON.stringify(record.gate_results ?? []),
     JSON.stringify(record.fuse_trace ?? []),
     JSON.stringify(record.timing ?? {}),
@@ -353,6 +355,22 @@ export async function flipStuckKarpathyToKilled(staleSeconds = 600): Promise<num
           )
      WHERE karpathy_check->>'status' = 'running'
        AND (karpathy_check->>'started_at')::float8
+           < EXTRACT(EPOCH FROM NOW())::float8 - $1`,
+    [staleSeconds],
+  );
+  return rowCount ?? 0;
+}
+
+export async function flipStuckCoverageGapToKilled(staleSeconds = 600): Promise<number> {
+  const { rowCount } = await pool().query(
+    `UPDATE runs
+     SET coverage_gap = coverage_gap
+       || jsonb_build_object(
+            'status', 'killed',
+            'flipped_at', EXTRACT(EPOCH FROM NOW())::float8
+          )
+     WHERE coverage_gap->>'status' = 'running'
+       AND (coverage_gap->>'started_at')::float8
            < EXTRACT(EPOCH FROM NOW())::float8 - $1`,
     [staleSeconds],
   );

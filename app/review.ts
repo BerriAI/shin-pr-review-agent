@@ -575,7 +575,7 @@ const PatternFindingSchema = z.object({
   risk: z.enum(["high", "medium", "low"]).default("low"),
   source: z.enum(["docs", "code"]),
   citation: z.string(),
-  rationale: z.string().max(200),
+  rationale: z.string().max(400),
 });
 
 const TechDebtItemSchema = z.object({

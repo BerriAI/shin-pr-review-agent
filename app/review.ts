@@ -557,7 +557,7 @@ export function initSystemPrompts(): void {
 
 const PriorSignalSchema = z.object({
   source: z.string(),
-  excerpt: z.string().max(400),
+  excerpt: z.string(),
   severity: z.enum(["nit", "concern", "blocker"]),
   status: z.enum(["agreed", "resolved", "disagreed", "out_of_scope"]),
   reason: z.string().default(""),
@@ -567,7 +567,7 @@ export const TriageReportSchema = z.object({
   pr_number: z.number().int(),
   pr_title: z.string(),
   pr_author: z.string(),
-  pr_summary: z.string().max(600),
+  pr_summary: z.string(),
   files_changed: z.number().int().default(0),
   additions: z.number().int().default(0),
   deletions: z.number().int().default(0),
@@ -598,7 +598,7 @@ export const TriageReportSchema = z.object({
   has_circleci_checks: z.boolean(),
   has_merge_conflicts: z.boolean().nullable().default(null),
   scope_drift: z.boolean().default(false),
-  scope_drift_reason: z.string().max(300).default(""),
+  scope_drift_reason: z.string().default(""),
   prior_signals: z.array(PriorSignalSchema).default([]),
 });
 export type TriageReport = z.infer<typeof TriageReportSchema>;
@@ -609,13 +609,13 @@ const PatternFindingSchema = z.object({
   risk: z.enum(["high", "medium", "low"]).default("low"),
   source: z.enum(["docs", "code"]),
   citation: z.string(),
-  rationale: z.string().max(200),
+  rationale: z.string(),
 });
 
 const TechDebtItemSchema = z.object({
   doc_path: z.string(),
   code_path: z.string(),
-  note: z.string().max(200),
+  note: z.string(),
 });
 
 export const PatternReportSchema = z.object({
@@ -2212,30 +2212,8 @@ export async function reviewPr(
           `reviewPr.triage: extractLastJson -> ${raw ? "ok" : "null"} ${raw ? `keys=${Object.keys(raw as Record<string, unknown>).join(",")}` : ""}`,
         );
         if (raw) {
-          // Soft-truncate the two .max()-bounded prose fields. The model
-          // routinely overshoots `pr_summary` on large refactor PRs (the
-          // schema allows 600 chars; on PR #26957 it produced 970), and
-          // losing the entire structured classification because of a 370-
-          // char overflow on a soft prose field would be the wrong trade.
-          // We tag the truncation so it's visible downstream.
-          const r = raw as Record<string, unknown>;
-          if (typeof r.pr_summary === "string" && r.pr_summary.length > 600) {
-            dbg(
-              `reviewPr.triage: soft-truncating pr_summary from ${r.pr_summary.length} → 600`,
-            );
-            r.pr_summary = r.pr_summary.slice(0, 597) + "…";
-          }
-          if (
-            typeof r.scope_drift_reason === "string" &&
-            r.scope_drift_reason.length > 300
-          ) {
-            dbg(
-              `reviewPr.triage: soft-truncating scope_drift_reason from ${r.scope_drift_reason.length} → 300`,
-            );
-            r.scope_drift_reason = r.scope_drift_reason.slice(0, 297) + "…";
-          }
           try {
-            triage = TriageReportSchema.parse(r);
+            triage = TriageReportSchema.parse(raw);
             dbg(
               `reviewPr.triage: parsed greptile_score=${triage.greptile_score} ` +
                 `pr_related_failures=${triage.pr_related_failures.length} ` +

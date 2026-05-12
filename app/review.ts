@@ -1826,16 +1826,17 @@ async function _triageLlmCall(
 // failure_rationales, prior_signals, scope_drift) are zeroed and a one-line
 // summary explains the LLM step was skipped.
 //
-// When `gateBlockReason` is provided (a gate fired and blocked the LLM), it
-// is injected into `pr_related_failures` so `fuse` produces a BLOCKED verdict
-// (-2 penalty → score ≤ 3) and Karpathy is correctly skipped. Without this
-// injection the fallback report has all-zero rubric fields, fuse gives score=5
-// (READY), and Karpathy runs needlessly for several minutes.
+// When `blockReason` is provided (a gate fired and blocked the LLM, or the
+// LLM step itself failed), it is injected into `pr_related_failures` so
+// `fuse` produces a BLOCKED verdict (-2 penalty → score ≤ 3) and automerge
+// is correctly suppressed. Without this injection the fallback report has
+// all-zero rubric fields, fuse gives score=5 (READY), and automerge fires
+// even though triage never ran.
 function _triageReportFromGather(
   prUrl: string,
   g: Record<string, unknown>,
   reason: string,
-  gateBlockReason?: string,
+  blockReason?: string,
 ): TriageReport {
   const diffFiles = (g.diff_files as any[] | undefined) ?? [];
   const filesChanged = diffFiles.length;
@@ -1868,7 +1869,7 @@ function _triageReportFromGather(
   // Build a short, user-readable summary describing the diff size + what fell
   // through. The verbose `reason` string (often a Zod error blob) goes only to
   // the debug log, never the user-facing card.
-  dbg(`_triageReportFromGather: building fallback (reason=${reason} gateBlockReason=${gateBlockReason ?? "none"})`);
+  dbg(`_triageReportFromGather: building fallback (reason=${reason} blockReason=${blockReason ?? "none"})`);
   const sizeLine = `${additions + deletions} line(s) across ${filesChanged} file(s) (+${additions}/-${deletions})`;
   const summary =
     `Gathered PR data only — the triage LLM step did not produce a valid ` +
@@ -1876,12 +1877,11 @@ function _triageReportFromGather(
     `were skipped. ${sizeLine}.`;
   // Defensive cap; sizeLine is short but keep us under the 600 schema bound.
   const pr_summary = summary.length > 600 ? summary.slice(0, 597) + "…" : summary;
-  // When a gate blocked the LLM call, inject the gate reason as a synthetic
-  // pr_related_failures entry. This causes fuse() to apply a -2 penalty
-  // (score ≤ 3 → verdict=BLOCKED) so Karpathy is correctly skipped.
-  // Without this, fuse sees all-zero rubric fields and returns score=5/READY,
-  // triggering an unnecessary ~5-minute Karpathy run.
-  const syntheticFailures = gateBlockReason ? [gateBlockReason] : [];
+  // Inject blockReason into pr_related_failures so fuse() applies a -2 penalty
+  // (score ≤ 3 → verdict=BLOCKED). Without this, fuse sees all-zero rubric
+  // fields and returns score=5/READY — automerge fires even though triage
+  // never produced a valid report.
+  const syntheticFailures = blockReason ? [blockReason] : [];
   return TriageReportSchema.parse({
     pr_number: prNum,
     pr_title: (g.pr_title as string | undefined) ?? prUrl,
@@ -2121,6 +2121,7 @@ export async function reviewPr(
               prUrl,
               gatherData,
               `schema parse error: ${String(parseErr).slice(0, 200)}`,
+              "triage-llm-invalid: schema validation failed — manual review required",
             );
             triagePlainAppend = triageOut.trim();
             log("triage: done (schema parse failed; using gather fallback)");
@@ -2131,6 +2132,7 @@ export async function reviewPr(
             prUrl,
             gatherData,
             "no JSON in model output",
+            "triage-llm-invalid: model returned no JSON — manual review required",
           );
           triagePlainAppend = triageOut.trim();
           log("triage: done (no JSON; using gather fallback)");
@@ -2155,6 +2157,7 @@ export async function reviewPr(
             prUrl,
             gatherData,
             `triage LLM error: ${errStr.slice(0, 200)}`,
+            `triage-llm-error: ${errStr.slice(0, 200)} — manual review required`,
           );
           log("triage: using gather-only fallback after LLM error");
         } else {

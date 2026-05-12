@@ -169,7 +169,7 @@ async function fetchPr(
   updated_at: string;
   title: string;
   head: { sha: string; ref: string };
-  base: { ref: string };
+  base: { ref: string; sha: string };
   user: { login: string; type?: string };
 }> {
   const r = await fetch(
@@ -190,7 +190,7 @@ async function fetchPr(
     updated_at: string;
     title: string;
     head: { sha: string; ref: string };
-    base: { ref: string };
+    base: { ref: string; sha: string };
     user: { login: string; type?: string };
   }>;
 }
@@ -2848,6 +2848,62 @@ async function autoMergeReadyPr(
       evidence: { author: authorLogin },
     });
     return;
+  }
+
+  // Gate: block if the staging branch has commits the PR head doesn't include.
+  // When staging has accumulated PRs and the contributor hasn't rebased onto it,
+  // the diff on GitHub (staging→head) shows reverting those accumulated commits
+  // mixed in with the contributor's actual change — impossible to review cleanly.
+  // Require the contributor to rebase onto the staging branch before automerging.
+  const agentBranch = agentBranchName();
+  const ghHeadersForGate = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  const stagingRefR = await fetch(
+    `https://api.github.com/repos/${repo}/git/refs/heads/${agentBranch}`,
+    { headers: ghHeadersForGate },
+  );
+  if (stagingRefR.status === 200) {
+    const stagingData = await stagingRefR.json() as { object: { sha: string } };
+    const stagingSha = stagingData.object.sha;
+    const prHeadSha = prState.head.sha;
+    if (stagingSha !== prHeadSha) {
+      const compareR = await fetch(
+        `https://api.github.com/repos/${repo}/compare/${stagingSha}...${prHeadSha}`,
+        { headers: ghHeadersForGate },
+      );
+      if (compareR.ok) {
+        const compareData = await compareR.json() as { ahead_by: number; behind_by: number };
+        if (compareData.behind_by > 0) {
+          console.log(
+            `[auto-merge] PR #${prNumber} skipped — staging ${agentBranch} is ${compareData.behind_by} commit(s) ahead of PR head ${prHeadSha.slice(0, 7)}; rebase required`,
+          );
+          await fetch(`https://api.github.com/repos/${repo}/issues/${prNumber}/comments`, {
+            method: "POST",
+            headers: { ...ghHeadersForGate, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              body:
+                `🤖 **litellm-agent**: Auto-merge skipped — the staging branch \`${agentBranch}\` has ${compareData.behind_by} commit(s) not in your branch. ` +
+                `Merging as-is would produce a confusing diff on the staging PR.\n\n` +
+                `Please rebase your branch onto \`${agentBranch}\` and push; the agent will re-review automatically.`,
+            }),
+          }).catch((err) => console.warn(`[auto-merge] PR #${prNumber} rebase-required comment failed:`, err));
+          await db.recordAutomergeDecision(runId, {
+            decision: "skipped",
+            reason: "staging_branch_diverged",
+            evidence: {
+              staging_branch: agentBranch,
+              staging_sha: stagingSha.slice(0, 7),
+              pr_head_sha: prHeadSha.slice(0, 7),
+              behind_by: compareData.behind_by,
+            },
+          });
+          return;
+        }
+      }
+    }
   }
 
   const { claimed, countToday } = await db.claimStagingMergeSlot(prNumber, repo, DAILY_MERGE_CAP);

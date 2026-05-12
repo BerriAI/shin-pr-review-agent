@@ -726,8 +726,8 @@ async function newSession(
 
 // --- Security agent (LiteLLM Managed Agent) -----------------------------------
 
-const SECURITY_AGENT_BASE = "https://litellm-agent-platform.onrender.com";
-const SECURITY_AGENT_ID = "214ec20b-4213-485a-a499-a206881b1891";
+const SECURITY_AGENT_BASE = process.env.SECURITY_AGENT_BASE?.replace(/\/+$/, "") ?? "";
+const SECURITY_AGENT_ID = process.env.SECURITY_AGENT_ID ?? "";
 
 async function _spawnSecuritySession(key: string): Promise<string> {
   const r = await fetch(
@@ -763,7 +763,7 @@ async function _sendSecurityMessage(sessionId: string, text: string, key: string
 
 export async function runSecurityCheck(prUrl: string): Promise<SecurityReport | null> {
   const key = _litellmKey ?? process.env.LITELLM_API_KEY;
-  if (!key) return null;
+  if (!key || !SECURITY_AGENT_BASE || !SECURITY_AGENT_ID) return null;
   try {
     const sessionId = await _spawnSecuritySession(key);
     const response = await _sendSecurityMessage(

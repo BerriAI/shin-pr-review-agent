@@ -2667,12 +2667,14 @@ export async function promptChatSession(
     // Strip the machine-parsed VERDICT: JSON line from chat output — users see
     // the Zone 1 summary only (≤240 chars per skill prompt). Keeps Slack/chat
     // replies brief while the VERDICT is already persisted via karpathy_check.
-    const output = rawOutput
+    // Cap only applies to karpathy intent; PR review and general intent need
+    // full output.
+    const stripped = rawOutput
       .split("\n")
       .filter(l => !l.trimStart().startsWith("VERDICT:"))
       .join("\n")
-      .trim()
-      .slice(0, 280); // hard cap in case the agent ignores the 240-char instruction
+      .trim();
+    const output = (thread.intent === "karpathy") ? stripped.slice(0, 280) : stripped;
     thread.turns.push({ role: "user", content: message });
     thread.turns.push({
       role: "assistant",

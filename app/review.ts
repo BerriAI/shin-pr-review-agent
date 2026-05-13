@@ -1491,6 +1491,24 @@ export function fuse(
 
   score = Math.max(score, 0);
 
+  // If Phase B ran but all three agent checks failed to approve, block regardless
+  // of triage score. k !== null means Phase B was attempted.
+  if (k !== null) {
+    const karpathyApproved = karpathyResult(k)?.decision === "merge";
+    const securityApproved =
+      s !== null &&
+      s.overall_risk !== "critical" &&
+      s.overall_risk !== "high" &&
+      s.overall_risk !== "medium";
+    const coverageApproved =
+      !!cg && cg.status === "ok" && (cg.result.gaps ?? 0) === 0;
+    if (!karpathyApproved && !securityApproved && !coverageApproved) {
+      score = 0;
+      penalties.push("all Phase B agent checks non-approving (karpathy + security + coverage gap)");
+      trace.push({ rule: "phase_b_none_approved", fired: true, weight: 5, label: "all Phase B agent checks non-approving" });
+    }
+  }
+
   let verdict: "READY" | "BLOCKED" | "WAITING";
   let emoji: string;
   if (t.running_checks.length) {

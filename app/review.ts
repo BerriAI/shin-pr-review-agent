@@ -940,6 +940,7 @@ function wrapWithSkill(systemPrompt: string, userMessage: string): string {
 
 const SECURITY_AGENT_BASE = process.env.SECURITY_AGENT_BASE?.replace(/\/+$/, "") ?? "";
 const SECURITY_AGENT_ID = process.env.SECURITY_AGENT_ID ?? "";
+const COVERAGE_GAP_AGENT_ID = process.env.COVERAGE_GAP_AGENT_ID ?? "ad9ae319-baf5-4974-bb5f-87ea472c9694";
 
 async function _spawnSecuritySession(key: string): Promise<string> {
   const r = await fetch(
@@ -989,6 +990,38 @@ export async function runSecurityCheck(prUrl: string): Promise<SecurityReport | 
   } catch {
     return null;
   }
+}
+
+async function _spawnCoverageGapSession(key: string): Promise<string> {
+  const r = await fetch(
+    `${SECURITY_AGENT_BASE}/v1/managed_agents/agents/${COVERAGE_GAP_AGENT_ID}/session`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "coverage gap review" }),
+    },
+  );
+  if (!r.ok) throw new Error(`coverage_gap: spawn session HTTP ${r.status}`);
+  const data = (await r.json()) as { session_id?: string; id?: string };
+  const sid = data.session_id ?? data.id;
+  if (!sid) throw new Error("coverage_gap: no session_id in spawn response");
+  return sid;
+}
+
+async function _sendCoverageGapMessage(sessionId: string, text: string, key: string): Promise<string> {
+  const r = await fetch(
+    `${SECURITY_AGENT_BASE}/v1/managed_agents/sessions/${sessionId}/message`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    },
+  );
+  if (!r.ok) throw new Error(`coverage_gap: send message HTTP ${r.status}`);
+  const data = (await r.json()) as {
+    response?: string; content?: string; text?: string; message?: string;
+  };
+  return data.response ?? data.content ?? data.text ?? data.message ?? JSON.stringify(data);
 }
 
 // --- Karpathy check via Pi SDK ------------------------------------------------
@@ -1103,28 +1136,27 @@ export async function runCoverageGapCheck(
   const started_at = Date.now() / 1000;
   const t0 = Date.now();
 
-  if (!CURSOR_API_KEY) return { status: "skipped", skip_reason: "no_cursor_key" };
+  const key = process.env.SECURITY_AGENT_KEY;
+  if (!key || !SECURITY_AGENT_BASE || !COVERAGE_GAP_AGENT_ID) {
+    return { status: "skipped", skip_reason: "no_cursor_key" };
+  }
   const prNum = prNumberFromUrl(prUrl);
   if (!prNum) return { status: "skipped", skip_reason: "invalid_pr_url" };
 
-  let toolTrace: ToolTraceEntry[] = [];
-  let cursorAgentUrl: string | undefined;
-
   return llmTracer.startActiveSpan("coverage_gap_check", async (span): Promise<CoverageGapRecord> => {
     span.setAttributes({
-      [SemanticConventions.LLM_SYSTEM]: "cursor",
+      [SemanticConventions.LLM_SYSTEM]: "litellm_managed_agent",
       "pr_url": prUrl,
     });
     try {
-      const agent = await newCloudAgent("coverage-gap");
-      const agentId: string | undefined = (agent as any).agentId;
-      if (agentId) cursorAgentUrl = `https://cursor.com/agents/${agentId}`;
+      const sessionId = await _spawnCoverageGapSession(key);
+      const response = await _sendCoverageGapMessage(
+        sessionId,
+        `Analyse this PR for test coverage gaps: ${prUrl}\n\nReturn the JSON verdict on the LAST LINE as a single-line object.`,
+        key,
+      );
 
-      const prompt = `${COVERAGE_GAP_SYSTEM}\n\n---\n\nAnalyse this PR for test coverage gaps: ${prUrl}\n\nReturn the JSON verdict on the LAST LINE as a single-line object.`;
-      const { output, toolTrace: rawTrace } = await runPrompt(agent, prompt);
-      toolTrace = capTrace(rawTrace);
-
-      const raw = extractLastJson(output);
+      const raw = extractLastJson(response);
       if (!raw) {
         span.setStatus({ code: SpanStatusCode.ERROR, message: "no JSON in output" });
         span.end();
@@ -1133,9 +1165,7 @@ export async function runCoverageGapCheck(
           started_at,
           finished_at: Date.now() / 1000,
           duration_ms: Date.now() - t0,
-          error: { kind: "no_json_in_output" as CoverageGapErrorKind, message: _stdoutTail(output) },
-          tool_trace: toolTrace,
-          ...(cursorAgentUrl ? { cursor_agent_url: cursorAgentUrl } : {}),
+          error: { kind: "no_json_in_output" as CoverageGapErrorKind, message: _stdoutTail(response) },
         };
       }
 
@@ -1150,8 +1180,6 @@ export async function runCoverageGapCheck(
         finished_at: Date.now() / 1000,
         duration_ms: Date.now() - t0,
         result,
-        tool_trace: toolTrace,
-        ...(cursorAgentUrl ? { cursor_agent_url: cursorAgentUrl } : {}),
       };
     } catch (err) {
       span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
@@ -1165,8 +1193,6 @@ export async function runCoverageGapCheck(
           kind: "cursor_agent_error" as CoverageGapErrorKind,
           message: String((err as Error)?.message ?? err).slice(0, 1000),
         },
-        tool_trace: toolTrace,
-        ...(cursorAgentUrl ? { cursor_agent_url: cursorAgentUrl } : {}),
       };
     }
   });

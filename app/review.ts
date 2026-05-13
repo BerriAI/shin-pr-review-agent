@@ -1518,8 +1518,9 @@ export function fuse(
   score = Math.max(score, 0);
 
   // If Phase B ran but all three agent checks failed to approve, block regardless
-  // of triage score. k !== null means Phase B was attempted.
-  if (k !== null) {
+  // of triage score. Phase B only runs when karpathy status is ok or errored
+  // (not skipped); skipped means provisional wasn't READY so Phase B never fired.
+  if (k !== null && (k.status === "ok" || k.status === "errored")) {
     const karpathyApproved = karpathyResult(k)?.decision === "merge";
     const securityApproved =
       s !== null &&
@@ -2489,6 +2490,15 @@ export async function reviewPr(
               `reviewPr.triage: soft-truncating scope_drift_reason from ${r.scope_drift_reason.length} → 300`,
             );
             r.scope_drift_reason = r.scope_drift_reason.slice(0, 297) + "…";
+          }
+          if (Array.isArray(r.prior_signals)) {
+            r.prior_signals = (r.prior_signals as Record<string, unknown>[]).map((sig) => {
+              if (typeof sig.excerpt === "string" && sig.excerpt.length > 400) {
+                dbg(`reviewPr.triage: soft-truncating prior_signals excerpt from ${sig.excerpt.length} → 400`);
+                return { ...sig, excerpt: sig.excerpt.slice(0, 397) + "…" };
+              }
+              return sig;
+            });
           }
           try {
             triage = TriageReportSchema.parse(r);

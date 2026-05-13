@@ -974,7 +974,7 @@ async function _sendSecurityMessage(sessionId: string, text: string, key: string
 }
 
 export async function runSecurityCheck(prUrl: string): Promise<SecurityReport | null> {
-  const key = process.env.LITELLM_API_KEY;
+  const key = process.env.SECURITY_AGENT_KEY;
   if (!key || !SECURITY_AGENT_BASE || !SECURITY_AGENT_ID) return null;
   try {
     const sessionId = await _spawnSecuritySession(key);

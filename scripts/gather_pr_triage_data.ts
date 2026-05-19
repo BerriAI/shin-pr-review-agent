@@ -567,7 +567,8 @@ export function _scoreFromGreptileCommentList(
       const verdict = editorMap?.get(c?.id);
       if (verdict !== "ok") continue; // unknown or tainted ⇒ reject
     }
-    candidates.push([created, c.body ?? ""]);
+    const sortKey = (updated && updated > created) ? updated : created;
+    candidates.push([sortKey, c.body ?? ""]);
   }
   candidates.sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0));
   for (const [, body] of candidates) {

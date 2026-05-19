@@ -979,7 +979,7 @@ async function _lapPollReady(sessionId: string, key: string, label: string, maxW
   throw new Error(`${label}: timed out waiting for session ready`);
 }
 
-async function _lapSendAndCollect(sessionId: string, text: string, key: string, label: string, maxWaitMs = 300_000): Promise<string> {
+async function _lapSendAndCollect(sessionId: string, text: string, key: string, label: string, maxWaitMs = 240_000): Promise<string> {
   // Send message with a short timeout — for agents that respond without tool calls,
   // the platform returns the result synchronously in `parts`. For agents that make
   // tool calls (real PR analysis), the gateway (60s ELB timeout) kills the connection

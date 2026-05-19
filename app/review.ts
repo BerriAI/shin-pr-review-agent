@@ -942,47 +942,79 @@ const SECURITY_AGENT_BASE = process.env.SECURITY_AGENT_BASE?.replace(/\/+$/, "")
 const SECURITY_AGENT_ID = process.env.SECURITY_AGENT_ID ?? "";
 const COVERAGE_GAP_AGENT_ID = process.env.COVERAGE_GAP_AGENT_ID ?? "ad9ae319-baf5-4974-bb5f-87ea472c9694";
 
-async function _spawnSecuritySession(key: string): Promise<string> {
+// --- Shared LAP (LiteLLM Agent Platform) helpers ------------------------------
+// Correct API contract (from run_lap_agent.ts):
+//   1. POST /agents/{id}/session          → { id: sessionId }
+//   2. GET  /sessions/{id}  (poll)        → wait until status === "ready"
+//   3. POST /sessions/{id}/message        → { seq_started, status: "accepted" }
+//   4. GET  /sessions/{id}/events?since=N → long-poll until session.idle event
+
+async function _lapSpawnSession(agentId: string, key: string, title: string, label: string): Promise<string> {
   const r = await fetch(
-    `${SECURITY_AGENT_BASE}/v1/managed_agents/agents/${SECURITY_AGENT_ID}/session`,
+    `${SECURITY_AGENT_BASE}/v1/managed_agents/agents/${agentId}/session`,
     {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "security review" }),
+      body: JSON.stringify({ title }),
     },
   );
-  if (!r.ok) throw new Error(`security: spawn session HTTP ${r.status}`);
-  const data = (await r.json()) as { session_id?: string; id?: string };
-  const sid = data.session_id ?? data.id;
-  if (!sid) throw new Error("security: no session_id in spawn response");
+  if (!r.ok) throw new Error(`${label}: spawn session HTTP ${r.status}`);
+  const data = (await r.json()) as { id?: string; session_id?: string };
+  const sid = data.id ?? data.session_id;
+  if (!sid) throw new Error(`${label}: no session id in spawn response`);
   return sid;
 }
 
-async function _sendSecurityMessage(sessionId: string, text: string, key: string): Promise<string> {
-  const r = await fetch(
+async function _lapPollReady(sessionId: string, key: string, label: string, maxWaitMs = 120_000): Promise<void> {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 3000));
+    const s = await fetch(
+      `${SECURITY_AGENT_BASE}/v1/managed_agents/sessions/${sessionId}`,
+      { headers: { Authorization: `Bearer ${key}` } },
+    ).then(r => r.json()) as any;
+    if (s.status === "ready") return;
+    if (s.status === "failed") throw new Error(`${label}: session failed: ${s.failure_reason ?? "unknown"}`);
+  }
+  throw new Error(`${label}: timed out waiting for session ready`);
+}
+
+async function _lapSendAndCollect(sessionId: string, text: string, key: string, label: string, timeoutMs = 300_000): Promise<string> {
+  const msgR = await fetch(
     `${SECURITY_AGENT_BASE}/v1/managed_agents/sessions/${sessionId}/message`,
     {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(timeoutMs),
     },
   );
-  if (!r.ok) throw new Error(`security: send message HTTP ${r.status}`);
-  const data = (await r.json()) as {
-    response?: string; content?: string; text?: string; message?: string;
-  };
-  return data.response ?? data.content ?? data.text ?? data.message ?? JSON.stringify(data);
+  if (!msgR.ok) throw new Error(`${label}: send message HTTP ${msgR.status}`);
+  // API returns response synchronously: { parts: [{ type, text }], info: {...} }
+  const data = (await msgR.json()) as { parts?: Array<{ type: string; text?: string }>; info?: unknown };
+  if (data.parts) {
+    return data.parts
+      .filter(p => p.type === "text" && p.text)
+      .map(p => p.text!)
+      .join("");
+  }
+  return JSON.stringify(data);
+}
+
+async function _lapRunAgent(agentId: string, key: string, title: string, prompt: string, label: string): Promise<string> {
+  const sessionId = await _lapSpawnSession(agentId, key, title, label);
+  await _lapPollReady(sessionId, key, label);
+  return _lapSendAndCollect(sessionId, prompt, key, label);
 }
 
 export async function runSecurityCheck(prUrl: string): Promise<SecurityReport | null> {
   const key = process.env.SECURITY_AGENT_KEY;
   if (!key || !SECURITY_AGENT_BASE || !SECURITY_AGENT_ID) return null;
   try {
-    const sessionId = await _spawnSecuritySession(key);
-    const response = await _sendSecurityMessage(
-      sessionId,
+    const response = await _lapRunAgent(
+      SECURITY_AGENT_ID, key, "security review",
       `Review this GitHub PR for security vulnerabilities: ${prUrl}`,
-      key,
+      "security",
     );
     const raw = extractLastJson(response);
     if (raw) return SecurityReportSchema.parse(raw);
@@ -990,38 +1022,6 @@ export async function runSecurityCheck(prUrl: string): Promise<SecurityReport | 
   } catch {
     return null;
   }
-}
-
-async function _spawnCoverageGapSession(key: string): Promise<string> {
-  const r = await fetch(
-    `${SECURITY_AGENT_BASE}/v1/managed_agents/agents/${COVERAGE_GAP_AGENT_ID}/session`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "coverage gap review" }),
-    },
-  );
-  if (!r.ok) throw new Error(`coverage_gap: spawn session HTTP ${r.status}`);
-  const data = (await r.json()) as { session_id?: string; id?: string };
-  const sid = data.session_id ?? data.id;
-  if (!sid) throw new Error("coverage_gap: no session_id in spawn response");
-  return sid;
-}
-
-async function _sendCoverageGapMessage(sessionId: string, text: string, key: string): Promise<string> {
-  const r = await fetch(
-    `${SECURITY_AGENT_BASE}/v1/managed_agents/sessions/${sessionId}/message`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    },
-  );
-  if (!r.ok) throw new Error(`coverage_gap: send message HTTP ${r.status}`);
-  const data = (await r.json()) as {
-    response?: string; content?: string; text?: string; message?: string;
-  };
-  return data.response ?? data.content ?? data.text ?? data.message ?? JSON.stringify(data);
 }
 
 // --- Karpathy check via Pi SDK ------------------------------------------------
@@ -1149,11 +1149,10 @@ export async function runCoverageGapCheck(
       "pr_url": prUrl,
     });
     try {
-      const sessionId = await _spawnCoverageGapSession(key);
-      const response = await _sendCoverageGapMessage(
-        sessionId,
+      const response = await _lapRunAgent(
+        COVERAGE_GAP_AGENT_ID, key, "coverage gap review",
         `Analyse this PR for test coverage gaps: ${prUrl}\n\nReturn the JSON verdict on the LAST LINE as a single-line object.`,
-        key,
+        "coverage_gap",
       );
 
       const raw = extractLastJson(response);

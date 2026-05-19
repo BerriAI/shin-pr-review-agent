@@ -34,6 +34,7 @@ type AutoMergeHook = (prUrl: string, prNumber: number, repo: string, runId: stri
 let _autoMergeHook: AutoMergeHook | null = null;
 export function setAutoMergeHook(fn: AutoMergeHook): void { _autoMergeHook = fn; }
 
+
 const llmTracer = trace.getTracer("pi-pr-review-agent.llm");
 const CAPTURE_PROMPTS = process.env.OTEL_LOG_PROMPTS !== "false";
 

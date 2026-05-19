@@ -27,8 +27,8 @@ export const screenshotGate: Gate = {
     return {
       category: "screenshot",
       reason:
-        "Screenshot gate: no screenshot or visual proof found in PR body or comments. " +
-        "Paste a screenshot showing the fix or feature working. " +
+        "This PR will be auto-closed as it lacks a screenshot for proof of fix. " +
+        "Please include one in the PR description. " +
         `Add the \`${EXEMPT_LABEL}\` label if this PR has no visible output (e.g. pure docs, CI config).`,
     };
   },

@@ -8,6 +8,7 @@ import type {
 import { greptileGate } from "./greptile.js";
 import { sizeGate } from "./size.js";
 import { loggingScreenshotGate } from "./logging_screenshot.js";
+import { screenshotGate } from "./screenshot.js";
 import { parseOverrides } from "./overrides.js";
 
 // Order matters: cheapest signal first, broadest blast radius last. The
@@ -18,6 +19,7 @@ const GATES: Gate[] = [
   greptileGate,
   sizeGate,
   loggingScreenshotGate,
+  screenshotGate,
 ];
 
 // Coerce the gather script's loosely-typed JSON into the narrow GatherData

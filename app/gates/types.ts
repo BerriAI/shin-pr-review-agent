@@ -27,7 +27,8 @@ export type GatherData = {
 export type GateCategory =
   | "greptile"
   | "size"
-  | "logging_screenshot";
+  | "logging_screenshot"
+  | "screenshot";
 
 export type GateBlock = {
   category: GateCategory;

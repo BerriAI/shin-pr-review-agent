@@ -979,26 +979,85 @@ async function _lapPollReady(sessionId: string, key: string, label: string, maxW
   throw new Error(`${label}: timed out waiting for session ready`);
 }
 
-async function _lapSendAndCollect(sessionId: string, text: string, key: string, label: string, timeoutMs = 300_000): Promise<string> {
-  const msgR = await fetch(
-    `${SECURITY_AGENT_BASE}/v1/managed_agents/sessions/${sessionId}/message`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-      signal: AbortSignal.timeout(timeoutMs),
-    },
-  );
-  if (!msgR.ok) throw new Error(`${label}: send message HTTP ${msgR.status}`);
-  // API returns response synchronously: { parts: [{ type, text }], info: {...} }
-  const data = (await msgR.json()) as { parts?: Array<{ type: string; text?: string }>; info?: unknown };
-  if (data.parts) {
-    return data.parts
-      .filter(p => p.type === "text" && p.text)
-      .map(p => p.text!)
-      .join("");
+async function _lapSendAndCollect(sessionId: string, text: string, key: string, label: string, maxWaitMs = 300_000): Promise<string> {
+  // Send message with a short timeout — for agents that respond without tool calls,
+  // the platform returns the result synchronously in `parts`. For agents that make
+  // tool calls (real PR analysis), the gateway (60s ELB timeout) kills the connection
+  // before the agent finishes, so we fall through to events-polling.
+  let seqStart = 0;
+  try {
+    const msgR = await fetch(
+      `${SECURITY_AGENT_BASE}/v1/managed_agents/sessions/${sessionId}/message`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+        signal: AbortSignal.timeout(65_000),
+      },
+    );
+    if (msgR.ok) {
+      const data = (await msgR.json()) as {
+        parts?: Array<{ type: string; text?: string }>;
+        status?: string;
+        seq_started?: number;
+      };
+      // Synchronous response: agent finished before gateway timeout
+      if (data.parts) {
+        return data.parts.filter(p => p.type === "text" && p.text).map(p => p.text!).join("");
+      }
+      // Async accepted: poll events
+      if (data.status === "accepted") {
+        seqStart = data.seq_started ?? 0;
+      }
+    }
+    // Any non-ok status other than 504: throw immediately
+    if (!msgR.ok && msgR.status !== 504) {
+      throw new Error(`${label}: send message HTTP ${msgR.status}`);
+    }
+  } catch (err: any) {
+    // AbortError (timeout) or 504: fall through to events polling from seq 0
+    if (err?.name !== "TimeoutError" && err?.name !== "AbortError" && !err?.message?.includes("504")) {
+      throw err;
+    }
   }
-  return JSON.stringify(data);
+
+  // Events polling: agent is still running, collect text until session.idle
+  const deadline = Date.now() + maxWaitMs;
+  let cursor = seqStart;
+  let assistantText = "";
+
+  while (Date.now() < deadline) {
+    const res = await fetch(
+      `${SECURITY_AGENT_BASE}/v1/managed_agents/sessions/${sessionId}/events?since=${cursor}&wait=25`,
+      { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(35_000) },
+    ).then(r => r.json()).catch(() => ({ events: [], next_since: cursor })) as any;
+
+    const events: any[] = res.events ?? [];
+    cursor = res.next_since ?? cursor;
+
+    for (const evt of events) {
+      const t = evt.type ?? evt.event_type;
+      if (t === "assistant" || t === "text") {
+        const chunk = evt.text ?? evt.data?.text ?? evt.content ?? "";
+        if (chunk) assistantText += chunk;
+      } else if (t === "session.idle" || t === "idle") {
+        return assistantText;
+      }
+    }
+
+    if (events.length === 0) {
+      const s = await fetch(
+        `${SECURITY_AGENT_BASE}/v1/managed_agents/sessions/${sessionId}`,
+        { headers: { Authorization: `Bearer ${key}` } },
+      ).then(r => r.json()).catch(() => ({})) as any;
+      if (s.status === "dead" || s.status === "failed") {
+        throw new Error(`${label}: session ended: ${s.status} ${s.failure_reason ?? ""}`);
+      }
+      // If response is in session object itself (some platforms embed final output)
+      if (s.response) return typeof s.response === "string" ? s.response : JSON.stringify(s.response);
+    }
+  }
+  throw new Error(`${label}: timed out waiting for agent response`);
 }
 
 async function _lapRunAgent(agentId: string, key: string, title: string, prompt: string, label: string): Promise<string> {
